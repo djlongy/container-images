@@ -1,0 +1,62 @@
+# container-images — upstream image promotion with full DevSecOps
+#
+# Promotes third-party container images into Harbor base-images/ with
+# scanning, SBOM generation, cosign signing, and Vigil supply chain gating.
+#
+# To promote a new version:
+#   1. Update TAG in images/<name>/image.env
+#   2. Push to main
+#   3. Pipeline builds, scans, signs only the changed images
+#
+# To rebuild all images: set FORCE_ALL=true in CI/CD variables
+
+include:
+  - project: 'infra/gitlab-ci-templates'
+    file: '/pipelines/devsecops.yml'
+    ref: main
+  # Local templates
+  - local: '.ci/promote.yml'
+  - local: '.ci/check-updates.yml'
+  # Per-image pipeline definitions
+  - local: 'images/prometheus/ci.yml'
+  - local: 'images/nginx/ci.yml'
+
+variables:
+  FORCE_ALL: "false"
+
+# Disable ALL default devsecops jobs — this repo has no application source
+# code to scan. Per-image jobs (build-xxx, trivy-image-xxx, etc.) replace
+# the default build/scan/sign/gate jobs.
+ko-build:
+  rules: [{ when: never }]
+jib-build:
+  rules: [{ when: never }]
+helm-oci-publish:
+  rules: [{ when: never }]
+smoke-test:
+  script: ["true"]
+  rules: [{ when: never }]
+buildkit-build:
+  rules: [{ when: never }]
+trivy-image:
+  rules: [{ when: never }]
+trivy-fs:
+  rules: [{ when: never }]
+syft-sbom:
+  rules: [{ when: never }]
+cosign-sign:
+  rules: [{ when: never }]
+vigil-notify:
+  rules: [{ when: never }]
+vigil-check:
+  script: ["true"]
+  rules: [{ when: never }]
+semgrep:
+  rules: [{ when: never }]
+sonarqube:
+  script: ["true"]
+  rules: [{ when: never }]
+lockfile-check:
+  rules: [{ when: never }]
+gitleaks:
+  rules: [{ when: never }]

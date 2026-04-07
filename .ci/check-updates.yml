@@ -1,0 +1,27 @@
+# Scheduled job: check for newer upstream image tags
+#
+# Run on a schedule (e.g. weekly) via GitLab CI schedules.
+# Creates one MR per image that has a newer version available.
+#
+# Setup:
+#   1. Set GITLAB_API_TOKEN as a CI/CD variable (needs api scope)
+#   2. GitLab → CI/CD → Schedules → New schedule
+#   3. Interval: 0 8 * * 1 (weekly, Monday 8am)
+#   4. Variables: CHECK_UPDATES=true
+#   5. Target branch: main
+#
+# Note: CI_JOB_TOKEN cannot create branches/MRs. A personal access token
+# or project access token with api scope is required as GITLAB_API_TOKEN.
+
+check-updates:
+  stage: .pre
+  image: alpine:3.21
+  script:
+    - apk add --no-cache bash curl python3 > /dev/null 2>&1
+    - |
+      export GITLAB_TOKEN="${GITLAB_API_TOKEN}"
+      export GITLAB_URL="${CI_SERVER_URL}"
+      export GITLAB_PROJECT="${CI_PROJECT_ID}"
+      bash scripts/check-updates.sh --create-mr
+  rules:
+    - if: '$CHECK_UPDATES == "true"'

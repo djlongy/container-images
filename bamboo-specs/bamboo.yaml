@@ -1,0 +1,256 @@
+# Bamboo pipeline for container image promotion
+#
+# Equivalent to the GitLab CI pipeline in .ci/promote.yml.
+# Uses scripts/build.sh as the core build logic — same as GitLab.
+#
+# Required Bamboo plan variables (Settings → Plan Variables):
+#   REGISTRY           — Target registry hostname
+#   REGISTRY_PROJECT   — Target project/repo prefix
+#   REGISTRY_USER      — Registry push username
+#   REGISTRY_PASSWORD  — Registry push password
+#   VENDOR             — Vendor label value
+#   CA_CERT            — (optional) PEM content of CA cert to inject
+#
+# Required linked repositories:
+#   container-images   — This Bitbucket repository
+#
+# Each image is a separate Bamboo stage with build → scan → sign jobs.
+# Add new images by duplicating a stage block and changing IMAGE_DIR.
+
+---
+version: 2
+
+plan:
+  project-key: DEVOPS
+  key: CIMG
+  name: Container Image Promotion
+
+triggers:
+  - polling:
+      period: 60
+      repositories:
+        - container-images
+
+stages:
+  - Build Prometheus:
+      jobs:
+        - build-prometheus
+  - Scan Prometheus:
+      jobs:
+        - trivy-prometheus
+        - sbom-prometheus
+  - Sign Prometheus:
+      jobs:
+        - cosign-prometheus
+
+  - Build Nginx:
+      jobs:
+        - build-nginx
+  - Scan Nginx:
+      jobs:
+        - trivy-nginx
+        - sbom-nginx
+  - Sign Nginx:
+      jobs:
+        - cosign-nginx
+
+# ── Prometheus ────────────────────────────────────────────────────────
+
+build-prometheus:
+  tasks:
+    - checkout:
+        repository: container-images
+    - script:
+        interpreter: /bin/sh
+        description: Build and push prometheus
+        body: |
+          export IMAGE_DIR=prometheus
+          ./scripts/build.sh prometheus --push
+  artifacts:
+    - name: build-env
+      location: .
+      pattern: build.env
+      shared: true
+  requirements:
+    - system.docker.executable
+
+trivy-prometheus:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Trivy vulnerability scan
+        body: |
+          . ./build.env
+          trivy image --exit-code 0 \
+            --severity CRITICAL,HIGH \
+            --format json --output trivy-report.json \
+            "${TRIVY_IMAGE}"
+          trivy image --exit-code 0 --severity CRITICAL,HIGH "${TRIVY_IMAGE}"
+  artifacts:
+    - name: trivy-report
+      location: .
+      pattern: trivy-report.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+sbom-prometheus:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Syft SBOM generation
+        body: |
+          . ./build.env
+          syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
+          echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
+  artifacts:
+    - name: sbom
+      location: .
+      pattern: sbom.cdx.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+cosign-prometheus:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+          - name: trivy-report
+            destination: .
+          - name: sbom
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Cosign sign + attestations
+        body: |
+          . ./build.env
+          TLOG_FLAG="--tlog-upload=false"
+
+          # Sign the image
+          cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
+            -a "ci.build=${bamboo_buildResultKey}" \
+            -a "ci.plan=${bamboo_planKey}" \
+            "${IMAGE_DIGEST}"
+
+          # Attest SBOM
+          if [ -f sbom.cdx.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type cyclonedx \
+              --predicate sbom.cdx.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+
+          # Attest vulnerability scan
+          if [ -f trivy-report.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type vuln \
+              --predicate trivy-report.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+  requirements:
+    - system.docker.executable
+
+# ── Nginx ─────────────────────────────────────────────────────────────
+
+build-nginx:
+  tasks:
+    - checkout:
+        repository: container-images
+    - script:
+        interpreter: /bin/sh
+        description: Build and push nginx
+        body: |
+          export IMAGE_DIR=nginx
+          ./scripts/build.sh nginx --push
+  artifacts:
+    - name: build-env
+      location: .
+      pattern: build.env
+      shared: true
+  requirements:
+    - system.docker.executable
+
+trivy-nginx:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Trivy vulnerability scan
+        body: |
+          . ./build.env
+          trivy image --exit-code 0 \
+            --severity CRITICAL,HIGH \
+            --format json --output trivy-report.json \
+            "${TRIVY_IMAGE}"
+          trivy image --exit-code 0 --severity CRITICAL,HIGH "${TRIVY_IMAGE}"
+  artifacts:
+    - name: trivy-report
+      location: .
+      pattern: trivy-report.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+sbom-nginx:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Syft SBOM generation
+        body: |
+          . ./build.env
+          syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
+          echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
+  artifacts:
+    - name: sbom
+      location: .
+      pattern: sbom.cdx.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+cosign-nginx:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+          - name: trivy-report
+            destination: .
+          - name: sbom
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Cosign sign + attestations
+        body: |
+          . ./build.env
+          TLOG_FLAG="--tlog-upload=false"
+
+          cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
+            -a "ci.build=${bamboo_buildResultKey}" \
+            -a "ci.plan=${bamboo_planKey}" \
+            "${IMAGE_DIGEST}"
+
+          if [ -f sbom.cdx.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type cyclonedx \
+              --predicate sbom.cdx.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+
+          if [ -f trivy-report.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type vuln \
+              --predicate trivy-report.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+  requirements:
+    - system.docker.executable

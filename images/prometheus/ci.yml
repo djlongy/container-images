@@ -1,0 +1,48 @@
+# Prometheus — promoted image pipeline
+# Config lives in image.env (edit version there, not here)
+
+build-prometheus:
+  extends: .promote-build
+  variables:
+    IMAGE_DIR: prometheus
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+    - if: '$FORCE_ALL == "true"'
+
+trivy-image-prometheus:
+  extends: .promote-scan
+  needs: [{ job: build-prometheus, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+    - if: '$FORCE_ALL == "true"'
+
+syft-sbom-prometheus:
+  extends: .promote-sbom
+  needs: [{ job: build-prometheus, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+    - if: '$FORCE_ALL == "true"'
+
+cosign-sign-prometheus:
+  extends: .promote-sign
+  needs:
+    - { job: build-prometheus, artifacts: true }
+    - { job: trivy-image-prometheus, artifacts: true }
+    - { job: syft-sbom-prometheus, artifacts: true, optional: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+    - if: '$FORCE_ALL == "true"'
+
+vigil-notify-prometheus:
+  extends: .promote-notify
+  needs:
+    - { job: cosign-sign-prometheus, optional: true }
+    - { job: build-prometheus, optional: true, artifacts: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+    - if: '$FORCE_ALL == "true"'

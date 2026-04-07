@@ -1,0 +1,48 @@
+# Nginx — promoted image pipeline
+# Config lives in image.env (edit version there, not here)
+
+build-nginx:
+  extends: .promote-build
+  variables:
+    IMAGE_DIR: nginx
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+    - if: '$FORCE_ALL == "true"'
+
+trivy-image-nginx:
+  extends: .promote-scan
+  needs: [{ job: build-nginx, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+    - if: '$FORCE_ALL == "true"'
+
+syft-sbom-nginx:
+  extends: .promote-sbom
+  needs: [{ job: build-nginx, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+    - if: '$FORCE_ALL == "true"'
+
+cosign-sign-nginx:
+  extends: .promote-sign
+  needs:
+    - { job: build-nginx, artifacts: true }
+    - { job: trivy-image-nginx, artifacts: true }
+    - { job: syft-sbom-nginx, artifacts: true, optional: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+    - if: '$FORCE_ALL == "true"'
+
+vigil-notify-nginx:
+  extends: .promote-notify
+  needs:
+    - { job: cosign-sign-nginx, optional: true }
+    - { job: build-nginx, optional: true, artifacts: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+    - if: '$FORCE_ALL == "true"'
