@@ -1,6 +1,7 @@
 # Auto-generated from .ci/image-ci.yml.template — do not edit by hand
 # To change pipeline structure for ALL images, edit the template then run:
 #   ./scripts/add-image.sh --regenerate
+# Pipeline version: 2
 
 build-__IMAGE__:
   extends: .promote-build
