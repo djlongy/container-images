@@ -210,3 +210,61 @@
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_COMMIT_TAG'
   allow_failure: true
+
+# ── Promote to production registry ────────────────────────────────────
+# Copies the exact image (same digest, same layers) from QA/dev registry
+# to production registry using crane. No rebuild. Bit-for-bit identical.
+#
+# Requires manual approval — the job won't run until someone clicks "play".
+#
+# CI variables needed:
+#   PROD_REGISTRY          — production registry hostname
+#   PROD_REGISTRY_PROJECT  — project/path in prod registry (defaults to REGISTRY_PROJECT)
+#   PROD_REGISTRY_USER     — prod registry username
+#   PROD_REGISTRY_PASSWORD — prod registry password
+#
+# Set ENABLE_PROD_PROMOTE=true as a CI variable to enable the promote stage.
+# Without it, promote jobs are skipped (safe default for repos that don't
+# need multi-registry promotion).
+
+.promote-prod:
+  stage: promote
+  image:
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [""]
+  script:
+    - source global.env
+    - source "images/${IMAGE_DIR}/image.env"
+    - |
+      PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
+      SRC="${REGISTRY}/${REGISTRY_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
+      DST="${PROD_REGISTRY}/${PROD_REGISTRY_PROJECT:-${REGISTRY_PROJECT}}/${IMAGE_NAME}:${PROMOTED_TAG}"
+      echo "=== Promoting to production ==="
+      echo "  Source: ${SRC}"
+      echo "  Dest:   ${DST}"
+    # Authenticate to both registries
+    - |
+      if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+        crane auth login "${REGISTRY}" -u "${REGISTRY_USER}" -p "${REGISTRY_PASSWORD}"
+      fi
+      if [ -n "${PROD_REGISTRY_USER:-}" ] && [ -n "${PROD_REGISTRY_PASSWORD:-}" ]; then
+        crane auth login "${PROD_REGISTRY}" -u "${PROD_REGISTRY_USER}" -p "${PROD_REGISTRY_PASSWORD}"
+      fi
+    # Copy — same digest, same layers, no rebuild
+    - |
+      crane copy "${SRC}" "${DST}"
+      echo "Promoted: ${DST}"
+      echo ""
+      echo "Source digest: $(crane digest "${SRC}")"
+      echo "Dest digest:   $(crane digest "${DST}")"
+  rules:
+    - if: '$ENABLE_PROD_PROMOTE != "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+      allow_failure: true

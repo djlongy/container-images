@@ -46,3 +46,21 @@ vigil-notify-prometheus:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes: [images/prometheus/**]
     - if: '$FORCE_ALL == "true"'
+
+promote-prod-prometheus:
+  extends: .promote-prod
+  variables:
+    IMAGE_DIR: prometheus
+  needs:
+    - { job: build-prometheus, artifacts: true }
+    - { job: vigil-notify-prometheus, optional: true }
+  rules:
+    - if: '$ENABLE_PROD_PROMOTE != "true"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/prometheus/**]
+      when: manual
+      allow_failure: true
+    - if: '$FORCE_ALL == "true"'
+      when: manual
+      allow_failure: true

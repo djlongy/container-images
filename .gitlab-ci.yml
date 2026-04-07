@@ -21,6 +21,17 @@ include:
   - local: 'images/prometheus/ci.yml'
   - local: 'images/nginx/ci.yml'
 
+stages:
+  - .pre
+  - verify
+  - secret-scan
+  - build
+  - test
+  - scan
+  - sign
+  - gate
+  - promote
+
 variables:
   FORCE_ALL: "false"
 

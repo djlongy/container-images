@@ -46,3 +46,21 @@ vigil-notify-nginx:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes: [images/nginx/**]
     - if: '$FORCE_ALL == "true"'
+
+promote-prod-nginx:
+  extends: .promote-prod
+  variables:
+    IMAGE_DIR: nginx
+  needs:
+    - { job: build-nginx, artifacts: true }
+    - { job: vigil-notify-nginx, optional: true }
+  rules:
+    - if: '$ENABLE_PROD_PROMOTE != "true"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/nginx/**]
+      when: manual
+      allow_failure: true
+    - if: '$FORCE_ALL == "true"'
+      when: manual
+      allow_failure: true

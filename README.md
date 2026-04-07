@@ -75,6 +75,11 @@ All settings come from environment variables or CI/CD pipeline variables.
 | `REGISTRY_PASSWORD` | CI variable (masked) | Registry push password |
 | `CA_CERT` | CI variable | PEM content of CA cert to inject |
 | `FORCE_ALL` | CI variable | `true` to rebuild all images |
+| `ENABLE_PROD_PROMOTE` | CI variable | `true` to show manual promote-to-prod jobs |
+| `PROD_REGISTRY` | CI variable | Production registry hostname |
+| `PROD_REGISTRY_PROJECT` | CI variable | Prod project/path (defaults to `REGISTRY_PROJECT`) |
+| `PROD_REGISTRY_USER` | CI variable | Prod registry username |
+| `PROD_REGISTRY_PASSWORD` | CI variable (masked) | Prod registry password |
 
 ## Repository Structure
 
@@ -220,12 +225,18 @@ CUSTOM_DOCKERFILE="false"     # true = use images/<name>/Dockerfile instead of s
 
 Each image runs through:
 
-1. **build** — BuildKit pulls from proxy/cache, adds provenance labels, pushes to target registry
+1. **build** — BuildKit pulls from proxy/cache, adds provenance labels, pushes to QA/dev registry
 2. **scan** — Trivy vulnerability gate + Syft SBOM generation (CycloneDX)
 3. **sign** — Cosign signature + attestations (SBOM, SLSA provenance, vuln)
 4. **gate** — Supply chain readiness check
+5. **promote** *(manual, optional)* — Copy exact image (same digest) to production registry
 
 Only images whose directory changed are built (GitLab `rules: changes:`).
+
+The promote stage uses `crane copy` for bit-for-bit registry-to-registry transfer —
+no rebuild, no new layers, same digest guaranteed. Requires manual approval (click
+"play" in the pipeline UI). Disabled by default — set `ENABLE_PROD_PROMOTE=true`
+to enable.
 
 ## OCI Metadata
 
