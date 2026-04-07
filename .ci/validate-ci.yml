@@ -1,0 +1,31 @@
+# Validates that per-image ci.yml files match the template
+#
+# Runs on every pipeline. If someone edited the template but forgot
+# to run ./scripts/add-image.sh --regenerate, this job fails with
+# a clear message showing which files are out of date.
+
+validate-ci-templates:
+  stage: .pre
+  image: alpine:3.21
+  script:
+    - apk add --no-cache bash > /dev/null 2>&1
+    - |
+      echo "Validating ci.yml files match template..."
+      bash scripts/add-image.sh --regenerate
+      CHANGED=$(git diff --name-only)
+      if [ -n "${CHANGED}" ]; then
+        echo ""
+        echo "ERROR: ci.yml files are out of date with .ci/image-ci.yml.template"
+        echo ""
+        echo "Stale files:"
+        echo "${CHANGED}"
+        echo ""
+        echo "Fix: run ./scripts/add-image.sh --regenerate and commit the changes"
+        exit 1
+      fi
+      echo "All ci.yml files are up to date"
+  rules:
+    - if: '$CHECK_UPDATES == "true"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
