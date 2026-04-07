@@ -1,5 +1,6 @@
-# Nginx — promoted image pipeline
-# Config lives in image.env (edit version there, not here)
+# Auto-generated from .ci/image-ci.yml.template — do not edit by hand
+# To change pipeline structure for ALL images, edit the template then run:
+#   ./scripts/add-image.sh --regenerate
 
 build-nginx:
   extends: .promote-build

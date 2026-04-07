@@ -19,21 +19,19 @@ variables or CI/CD pipeline variables — nothing is hardcoded.
 
 ### Add a new image
 
-1. Copy an existing image directory:
-   ```bash
-   cp -r images/prometheus images/redis
-   ```
+```bash
+./scripts/add-image.sh redis
+```
 
-2. Edit `images/redis/image.env` — set IMAGE_NAME, TAG, SOURCE
+This scaffolds `images/redis/` with `image.env` and `ci.yml`, and adds the
+include to `.gitlab-ci.yml`. Then:
 
-3. Edit `images/redis/ci.yml` — find-replace `prometheus` → `redis`
+1. Edit `images/redis/image.env` — set `TAG` and `SOURCE`
+2. Push to `main`
 
-4. Add one include line to `.gitlab-ci.yml`:
-   ```yaml
-   - local: 'images/redis/ci.yml'
-   ```
-
-5. Push to `main`
+The `ci.yml` is auto-generated from `.ci/image-ci.yml.template` — never edit
+it by hand. To change the pipeline structure for all images, edit the template
+and run `./scripts/add-image.sh --regenerate`.
 
 ### Build locally
 
