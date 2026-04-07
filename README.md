@@ -138,24 +138,32 @@ Inject company root CAs into the image trust store. Works with any base image
 (Alpine, Debian, distroless, scratch) via a multi-stage builder pattern that
 merges your CA with the upstream bundle (nothing is lost).
 
-CA certs are **never stored in the repo** — they're injected at build time:
+CA certs are **never stored in the repo** — they're injected at build time
+from one of three sources (checked in order):
 
-**In CI** — set `CA_CERT` as a CI/CD variable (paste the PEM content):
-```
-# GitLab: Settings → CI/CD → Variables → Add variable
-# Bamboo: Plan Variables or Global Variables
-# Key: CA_CERT   Value: <paste PEM content>
-```
+1. **`CA_CERT` env / CI variable** — paste PEM content directly:
+   ```bash
+   # CI: set CA_CERT as a pipeline variable (GitLab, Bamboo, GitHub Actions)
+   # Local:
+   export CA_CERT="$(cat /path/to/your-ca.crt)"
+   ./scripts/build.sh nginx
+   ```
 
-**Locally** — set `CA_CERT` env var or let `build.sh` pull from Vault:
-```bash
-# Option 1: env var
-export CA_CERT="$(cat /path/to/your-ca.crt)"
-./scripts/build.sh nginx
+2. **HashiCorp Vault** — `build.sh` pulls automatically if `vault` CLI is available:
+   ```bash
+   # Uses VAULT_KV_MOUNT (default: secret) and VAULT_CA_PATH (default: pki/root-ca)
+   ./scripts/build.sh nginx
+   ```
 
-# Option 2: build.sh pulls from Vault (if vault CLI available)
-./scripts/build.sh nginx
-```
+3. **Files in `certs/` directory** — drop `.crt` files directly (gitignored):
+   ```bash
+   # Useful for local testing or runners that pre-populate certs/
+   cp /path/to/company-root-ca.crt certs/
+   ./scripts/build.sh nginx
+   ```
+
+The Dockerfile picks up **all** `.crt` files from `certs/` regardless of how
+they got there. Multiple CAs are supported — just add more `.crt` files.
 
 Then set flags in `image.env`:
 ```bash
