@@ -34,6 +34,7 @@
 
 ARG BASE_IMAGE                  # Set by CI/build.sh from SOURCE:TAG
 ARG BUILDER_IMAGE=alpine:3.21   # Overridden from global.env via registry proxy
+ARG APK_MIRROR=""               # Overridden from global.env — replaces dl-cdn.alpinelinux.org/alpine
 ARG INJECT_CERTS=false          # Overridden per image via image.env
 ARG REMEDIATE=false             # Overridden per image via image.env
 
@@ -42,7 +43,11 @@ FROM ${BASE_IMAGE} AS upstream-certs
 
 # ── Stage: build merged cert bundle ──────────────────────────────────
 FROM ${BUILDER_IMAGE} AS certs
-RUN apk add --no-cache ca-certificates
+ARG APK_MIRROR=""
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi && \
+    apk add --no-cache ca-certificates
 COPY --from=upstream-certs /etc/ssl/certs/ca-certificates.crt /tmp/upstream-bundle.crt
 RUN cat /tmp/upstream-bundle.crt >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
 COPY certs/*.crt /usr/local/share/ca-certificates/
@@ -83,9 +88,13 @@ LABEL promoted.tag="${APP_VERSION}"
 FROM base AS base-remediated
 ARG ORIGINAL_USER="root"        # Overridden from image.env
 ARG IMAGE_DIR=""                # Overridden by CI/build.sh (e.g. "nginx")
+ARG APK_MIRROR=""
 USER root
 COPY images/${IMAGE_DIR}/remediate.sh /tmp/remediate.sh
-RUN chmod +x /tmp/remediate.sh && /tmp/remediate.sh && rm -f /tmp/remediate.sh
+RUN if [ -n "${APK_MIRROR}" ] && [ -f /etc/apk/repositories ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi && \
+    chmod +x /tmp/remediate.sh && /tmp/remediate.sh && rm -f /tmp/remediate.sh
 USER ${ORIGINAL_USER}
 
 # ── Stage: base + merged certs ───────────────────────────────────────

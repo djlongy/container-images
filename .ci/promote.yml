@@ -106,6 +106,7 @@
         --opt build-arg:APP_VERSION="${PROMOTED_TAG}" \
         --opt build-arg:BASE_IMAGE="${BASE}" \
         --opt "build-arg:BUILDER_IMAGE=${BUILDER_IMAGE:-alpine:3.21}" \
+        --opt "build-arg:APK_MIRROR=${APK_MIRROR:-}" \
         --opt build-arg:TAG="${TAG}" \
         --opt "build-arg:VENDOR=${VENDOR:-}" \
         --opt "build-arg:VCS_REF=${CI_COMMIT_SHA}" \
