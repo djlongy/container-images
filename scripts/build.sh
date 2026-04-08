@@ -162,6 +162,7 @@ echo ""
 # shellcheck disable=SC2086
 docker build \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+  --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE:-alpine:3.21}" \
   --build-arg "TAG=${TAG}" \
   --build-arg "APP_VERSION=${PROMOTED_TAG}" \
   --build-arg "VENDOR=${VENDOR:-}" \

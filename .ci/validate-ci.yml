@@ -6,7 +6,7 @@
 
 validate-ci-templates:
   stage: .pre
-  image: alpine:3.21
+  image: ${BUILDER_IMAGE}
   script:
     - apk add --no-cache bash git > /dev/null 2>&1
     - |

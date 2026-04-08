@@ -35,6 +35,9 @@ stages:
 
 variables:
   FORCE_ALL: "false"
+  # Alpine via registry proxy — no direct Docker Hub access assumed.
+  # Override in CI/CD settings to match your proxy path convention.
+  BUILDER_IMAGE: "${REGISTRY}/docker-hub/library/alpine:3.21"
 
 # Disable ALL default devsecops jobs — this repo has no application source
 # code to scan. Per-image jobs (build-xxx, trivy-image-xxx, etc.) replace

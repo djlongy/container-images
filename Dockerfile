@@ -33,6 +33,7 @@
 # ─────────────────────────────────────────────────────────────────────
 
 ARG BASE_IMAGE                  # Set by CI/build.sh from SOURCE:TAG
+ARG BUILDER_IMAGE=alpine:3.21   # Overridden from global.env via registry proxy
 ARG INJECT_CERTS=false          # Overridden per image via image.env
 ARG REMEDIATE=false             # Overridden per image via image.env
 
@@ -40,7 +41,7 @@ ARG REMEDIATE=false             # Overridden per image via image.env
 FROM ${BASE_IMAGE} AS upstream-certs
 
 # ── Stage: build merged cert bundle ──────────────────────────────────
-FROM alpine:3.21 AS certs
+FROM ${BUILDER_IMAGE} AS certs
 RUN apk add --no-cache ca-certificates
 COPY --from=upstream-certs /etc/ssl/certs/ca-certificates.crt /tmp/upstream-bundle.crt
 RUN cat /tmp/upstream-bundle.crt >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
