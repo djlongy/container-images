@@ -42,8 +42,14 @@ ARG REMEDIATE=false             # Overridden per image via image.env
 FROM ${BASE_IMAGE} AS upstream-certs
 
 # ── Stage: build merged cert bundle ──────────────────────────────────
+# Bootstrap: inject CA certs into the trust store BEFORE apk runs, so
+# apk can reach the registry proxy over TLS signed by an internal CA.
+# This breaks the chicken-and-egg: we cat the PEM directly into the
+# system bundle (no package install needed), then apk trusts the proxy.
 FROM ${BUILDER_IMAGE} AS certs
 ARG APK_MIRROR=""
+COPY certs/*.crt /tmp/custom-ca/
+RUN cat /tmp/custom-ca/*.crt >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
 RUN if [ -n "${APK_MIRROR}" ]; then \
       sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \
     fi && \
@@ -90,6 +96,8 @@ ARG ORIGINAL_USER="root"        # Overridden from image.env
 ARG IMAGE_DIR=""                # Overridden by CI/build.sh (e.g. "nginx")
 ARG APK_MIRROR=""
 USER root
+COPY certs/*.crt /tmp/custom-ca/
+RUN cat /tmp/custom-ca/*.crt >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
 COPY images/${IMAGE_DIR}/remediate.sh /tmp/remediate.sh
 RUN if [ -n "${APK_MIRROR}" ] && [ -f /etc/apk/repositories ]; then \
       sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \

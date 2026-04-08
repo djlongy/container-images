@@ -17,6 +17,7 @@ check-updates:
   stage: .pre
   image: ${BUILDER_IMAGE}
   script:
+    - if [ -n "${CA_CERT}" ]; then echo "${CA_CERT}" >> /etc/ssl/certs/ca-certificates.crt; fi
     - if [ -n "${APK_MIRROR}" ]; then sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; fi
     - apk add --no-cache bash curl python3 > /dev/null 2>&1
     - |
