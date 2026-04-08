@@ -74,6 +74,8 @@ All settings come from environment variables or CI/CD pipeline variables.
 | `CA_CERT` | CI variable | PEM content of CA cert to inject |
 | `FORCE_ALL` | CI variable | `true` to rebuild all images |
 | `ENABLE_PROD_PROMOTE` | CI variable | `true` to show manual promote-to-prod jobs |
+| `BUILDER_IMAGE` | global.env / CI variable | Alpine image for cert builder stage (via registry proxy) |
+| `APK_MIRROR` | global.env / CI variable | Alpine apk mirror base URL (replaces dl-cdn.alpinelinux.org/alpine) |
 | `PROD_REGISTRY` | CI variable | Production registry hostname |
 | `PROD_REGISTRY_PROJECT` | CI variable | Prod project/path (defaults to `REGISTRY_PROJECT`) |
 | `PROD_REGISTRY_USER` | CI variable | Prod registry username |
@@ -176,6 +178,67 @@ ORIGINAL_USER="nobody"    # Upstream USER to restore after cert injection
 
 The `ORIGINAL_USER` must match the upstream image's USER (check with
 `docker inspect <image> --format='{{.Config.User}}'`).
+
+### Air-Gapped / Proxy Environments
+
+If your environment has no direct internet access, all external dependencies
+can be routed through a registry proxy (Nexus, Artifactory, Harbor, etc.).
+Three variables control this — all set in `global.env` or as CI variables:
+
+**`REGISTRY`** — Docker image proxy (already required for `SOURCE` in image.env).
+
+**`BUILDER_IMAGE`** — The Alpine image used internally for cert building.
+Defaults to `${REGISTRY}/docker-hub/library/alpine:3.21` so it pulls through
+your Docker Hub proxy instead of hitting Docker Hub directly.
+
+**`APK_MIRROR`** — Alpine package mirror base URL. Replaces
+`dl-cdn.alpinelinux.org/alpine` in `/etc/apk/repositories` so `apk` fetches
+packages through your proxy. Version paths (`v3.21/main`, `v3.21/community`)
+are preserved automatically.
+
+```bash
+# global.env — example for Nexus
+BUILDER_IMAGE="${BUILDER_IMAGE:-${REGISTRY}/docker-hub/library/alpine:3.21}"
+APK_MIRROR="${APK_MIRROR:-https://nexus.example.com/repository/alpine-proxy}"
+```
+
+#### Nexus Sonatype Setup
+
+Create an Alpine proxy repository using the **raw** format (Alpine repos are
+static file trees, not a package API):
+
+1. Nexus Admin → Repositories → Create repository → **raw (proxy)**
+2. **Name**: `alpine-proxy`
+3. **Remote URL**: `https://dl-cdn.alpinelinux.org/alpine`
+4. **Content max age**: 1440 (24h) — packages are immutable per version
+5. **Metadata max age**: 60 (1h) — APKINDEX refreshes periodically
+6. **Strict content type validation**: disabled (Alpine serves mixed types)
+
+Then set `APK_MIRROR` to the repo URL:
+```bash
+APK_MIRROR="https://nexus.example.com/repository/alpine-proxy"
+```
+
+#### Self-Signed CA Bootstrap (Chicken-and-Egg)
+
+If your proxy uses a TLS certificate signed by an internal CA, there is a
+bootstrapping problem: the container needs to trust the CA to reach the proxy,
+but it needs the proxy to install `ca-certificates`.
+
+This is handled automatically. The Dockerfile injects CA certs from `certs/`
+directly into `/etc/ssl/certs/ca-certificates.crt` (a plain `cat` append)
+**before** any `apk` command runs. This requires no package install — the
+file already exists in base Alpine and is read by OpenSSL/libssl. The sequence:
+
+1. `COPY certs/*.crt` → `cat` into system trust bundle (bootstrap)
+2. `apk` now trusts the proxy's TLS cert and can install packages
+3. `update-ca-certificates` runs later to build the proper merged bundle
+
+For CI jobs, the same bootstrap uses the `CA_CERT` CI variable:
+```yaml
+# Automatically injected before apk in validate-ci and check-updates jobs
+- if [ -n "${CA_CERT}" ]; then echo "${CA_CERT}" >> /etc/ssl/certs/ca-certificates.crt; fi
+```
 
 ### Custom Dockerfile Override
 
