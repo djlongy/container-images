@@ -8,7 +8,13 @@ build-__IMAGE__:
     IMAGE_DIR: __IMAGE__
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 trivy-image-__IMAGE__:
@@ -16,7 +22,13 @@ trivy-image-__IMAGE__:
   needs: [{ job: build-__IMAGE__, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 syft-sbom-__IMAGE__:
@@ -24,7 +36,13 @@ syft-sbom-__IMAGE__:
   needs: [{ job: build-__IMAGE__, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 cosign-sign-__IMAGE__:
@@ -35,7 +53,13 @@ cosign-sign-__IMAGE__:
     - { job: syft-sbom-__IMAGE__, artifacts: true, optional: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 vigil-notify-__IMAGE__:
@@ -45,7 +69,13 @@ vigil-notify-__IMAGE__:
     - { job: build-__IMAGE__, optional: true, artifacts: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 promote-prod-__IMAGE__:
@@ -59,7 +89,13 @@ promote-prod-__IMAGE__:
     - if: '$ENABLE_PROD_PROMOTE != "true"'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/__IMAGE__/**]
+      changes:
+        - images/__IMAGE__/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
       when: manual
       allow_failure: true
     - if: '$FORCE_ALL == "true"'

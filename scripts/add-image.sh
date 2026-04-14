@@ -33,8 +33,10 @@ if [ "${1:-}" = "--regenerate" ]; then
   echo "Regenerating all ci.yml files from .ci/image-ci.yml.template"
   for DIR in "${REPO_ROOT}"/images/*/; do
     NAME="$(basename "${DIR}")"
-    [ -f "${DIR}/image.env" ] || continue
-    generate_ci "${NAME}"
+    # Match either the committed template or a local override
+    if [ -f "${DIR}/image.env.example" ] || [ -f "${DIR}/image.env" ]; then
+      generate_ci "${NAME}"
+    fi
   done
   echo "Done. Review changes with: git diff"
   exit 0

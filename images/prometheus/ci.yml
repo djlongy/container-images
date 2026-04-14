@@ -8,7 +8,13 @@ build-prometheus:
     IMAGE_DIR: prometheus
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 trivy-image-prometheus:
@@ -16,7 +22,13 @@ trivy-image-prometheus:
   needs: [{ job: build-prometheus, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 syft-sbom-prometheus:
@@ -24,7 +36,13 @@ syft-sbom-prometheus:
   needs: [{ job: build-prometheus, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 cosign-sign-prometheus:
@@ -35,7 +53,13 @@ cosign-sign-prometheus:
     - { job: syft-sbom-prometheus, artifacts: true, optional: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 vigil-notify-prometheus:
@@ -45,7 +69,13 @@ vigil-notify-prometheus:
     - { job: build-prometheus, optional: true, artifacts: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 promote-prod-prometheus:
@@ -59,7 +89,13 @@ promote-prod-prometheus:
     - if: '$ENABLE_PROD_PROMOTE != "true"'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/prometheus/**]
+      changes:
+        - images/prometheus/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
       when: manual
       allow_failure: true
     - if: '$FORCE_ALL == "true"'

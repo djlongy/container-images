@@ -8,7 +8,13 @@ build-nginx:
     IMAGE_DIR: nginx
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 trivy-image-nginx:
@@ -16,7 +22,13 @@ trivy-image-nginx:
   needs: [{ job: build-nginx, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 syft-sbom-nginx:
@@ -24,7 +36,13 @@ syft-sbom-nginx:
   needs: [{ job: build-nginx, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 cosign-sign-nginx:
@@ -35,7 +53,13 @@ cosign-sign-nginx:
     - { job: syft-sbom-nginx, artifacts: true, optional: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 vigil-notify-nginx:
@@ -45,7 +69,13 @@ vigil-notify-nginx:
     - { job: build-nginx, optional: true, artifacts: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
 promote-prod-nginx:
@@ -59,7 +89,13 @@ promote-prod-nginx:
     - if: '$ENABLE_PROD_PROMOTE != "true"'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes: [images/nginx/**]
+      changes:
+        - images/nginx/**
+        - global.env.example
+        - Dockerfile
+        - scripts/**
+        - .ci/promote.yml
+        - .ci/image-ci.yml.template
       when: manual
       allow_failure: true
     - if: '$FORCE_ALL == "true"'
