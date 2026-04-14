@@ -33,10 +33,14 @@
     - name: docker:27-dind
       alias: docker
   variables:
-    DOCKER_HOST: tcp://docker:2376
-    DOCKER_TLS_CERTDIR: /certs
-    DOCKER_CERT_PATH: /certs/client
-    DOCKER_TLS_VERIFY: "1"
+    # dind over plain TCP on the CI bridge network. The "proper" TLS
+    # setup needs /certs/client shared between the dind service and
+    # the job container, which requires adding "/certs/client" to the
+    # GitLab runner's [runners.docker] volumes list. Until that's
+    # ansible-ified, we use the pre-TLS pattern — confined network,
+    # acceptable for internal CI.
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
     IMAGE_DIR: ""
   before_script:
     # docker:27-cli is alpine-based; scripts/build.sh needs bash, git,
