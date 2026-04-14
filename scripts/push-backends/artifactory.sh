@@ -10,8 +10,8 @@
 #                                    property tagging
 #      Both are shell parameter-expansion templates. See the
 #      "Artifactory layout templates" section in global.env.example
-#      for four named presets (homelab per-team, shared repo, subdomain,
-#      subdomain-per-team) or write your own.
+#      for five named presets (homelab per-team, shared repo, subdomain,
+#      subdomain-per-team, team-dispatch subdomain) or write your own.
 #
 #   2. Retags the locally-built image to the resolved ARTIFACTORY_IMAGE_REF
 #      and logs docker in to ARTIFACTORY_PUSH_HOST before pushing.
