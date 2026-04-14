@@ -3,20 +3,54 @@
 # Equivalent to the GitLab CI pipeline in .ci/promote.yml.
 # Uses scripts/build.sh as the core build logic — same as GitLab.
 #
-# Required Bamboo plan variables (Settings → Plan Variables):
-#   PULL_REGISTRY          — Registry proxy hostname base images are pulled from
-#   PUSH_REGISTRY          — Registry hostname built images are pushed to
-#   PUSH_PROJECT           — Target project/repo prefix
-#   PUSH_REGISTRY_USER     — Push-target username
-#   PUSH_REGISTRY_PASSWORD — Push-target password
-#   VENDOR             — Vendor label value
-#   CA_CERT            — (optional) PEM content of CA cert to inject
+# Required Bamboo plan variables (Settings → Plan Variables).
+# The shared block is sufficient for a plain Harbor push; the
+# REGISTRY_KIND / ARTIFACTORY_* block is only needed if you want
+# pipelines to push to Artifactory instead of (or in addition to)
+# Harbor via scripts/push-backends/artifactory.sh.
+#
+#   # ── Pull + push baseline (always required) ───
+#   PULL_REGISTRY           Registry proxy base images are pulled from
+#   PUSH_REGISTRY           Registry built images are pushed to
+#   PUSH_PROJECT            Project/repo prefix in the push registry
+#   PUSH_REGISTRY_USER      Push-target username
+#   PUSH_REGISTRY_PASSWORD  Push-target password
+#   VENDOR                  Vendor label value
+#   CA_CERT                 (optional) PEM content of CA cert to inject
+#
+#   # ── Air-gapped / mirrored build (optional) ───
+#   APK_MIRROR              Raw-proxy URL for Alpine apk (dl-cdn substitute)
+#   APT_MIRROR              Apt-proxy base URL for Debian/Ubuntu remediation
+#
+#   # ── Prod promote destination (optional) ─────
+#   PROD_PUSH_REGISTRY           Production registry hostname
+#   PROD_PUSH_PROJECT            Prod project/repo prefix
+#   PROD_PUSH_REGISTRY_USER      Prod registry username
+#   PROD_PUSH_REGISTRY_PASSWORD  Prod registry password
+#
+#   # ── Artifactory backend (optional) ──────────
+#   REGISTRY_KIND            Set to "artifactory" to enable
+#   ARTIFACTORY_URL          https://artifactory.example.com
+#   ARTIFACTORY_USER         Team/service user with push rights
+#   ARTIFACTORY_TOKEN        Access token (preferred) OR
+#   ARTIFACTORY_PASSWORD     basic-auth password
+#   ARTIFACTORY_TEAM         Routing prefix (newen, sdte, jcom, ...)
+#   ARTIFACTORY_ENVIRONMENT  dev|prod → -docker-local / -docker-prod
+#   ARTIFACTORY_PROPERTIES   Extra ;-separated props (optional)
+#
+#   # ── Pipeline control ────────────────────────
+#   FORCE_ALL                "true" rebuilds every image regardless of
+#                            the per-image path gate (use for cosign-key
+#                            rotation, base-image bumps across the board,
+#                            etc.)
 #
 # Required linked repositories:
-#   container-images   — This Bitbucket repository
+#   container-images   — this repository
 #
 # Each image is a separate Bamboo stage with build → scan → sign jobs.
-# Add new images by duplicating a stage block and changing IMAGE_DIR.
+# Add a new image by duplicating a stage block and changing the image
+# name. The per-image path gate at the top of each build job short-
+# circuits unchanged images so pipeline runs are fast.
 
 ---
 version: 2
@@ -63,6 +97,29 @@ stages:
       jobs:
         - promote-prod-nginx
 
+  - Build Sonarqube:
+      jobs:
+        - build-sonarqube
+  - Scan Sonarqube:
+      jobs:
+        - trivy-sonarqube
+        - sbom-sonarqube
+  - Sign Sonarqube:
+      jobs:
+        - cosign-sonarqube
+  - Promote Sonarqube:
+      manual: true
+      jobs:
+        - promote-prod-sonarqube
+
+# ── Shared shell snippets ────────────────────────────────────────────
+#
+# Each build job starts with the same boilerplate: path gate first,
+# then exports the Bamboo plan vars into the environment so build.sh
+# (which reads from shell env with highest precedence) picks them up.
+# Kept inline per-job below — YAML anchors don't interact cleanly
+# with Bamboo's script-body parsing.
+
 # ── Prometheus ────────────────────────────────────────────────────────
 
 build-prometheus:
@@ -71,9 +128,40 @@ build-prometheus:
         repository: container-images
     - script:
         interpreter: /bin/sh
-        description: Build and push prometheus
+        description: Gate + build and push prometheus
         body: |
-          export IMAGE_DIR=prometheus
+          # Per-image path gate — skip the rest of the pipeline if
+          # nothing relevant to this image changed since the previous
+          # commit. FORCE_ALL=true bypasses the gate for across-the-
+          # board rebuilds (cosign key rotation, Dockerfile change, etc).
+          # Falls back to HEAD diff on the first commit where HEAD~1
+          # doesn't exist.
+          if [ "${bamboo_FORCE_ALL:-false}" != "true" ]; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD \
+              -- images/prometheus/ global.env.example Dockerfile scripts/ 2>/dev/null || \
+              git diff --name-only HEAD -- images/prometheus/ global.env.example Dockerfile scripts/)
+            if [ -z "$CHANGED" ]; then
+              echo "No changes for prometheus — skipping"
+              echo "SKIP=true" > build.env
+              exit 0
+            fi
+          fi
+
+          # Relay plan variables into shell env. build.sh's env snapshot
+          # preserves anything set here so file values in global.env.example
+          # / images/<name>/image.env.example act as defaults only.
+          for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
+                     APK_MIRROR APT_MIRROR CA_CERT \
+                     REGISTRY_KIND \
+                     ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
+                     ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PROPERTIES; do
+            bv="bamboo_${var}"
+            eval "val=\${${bv}:-}"
+            [ -n "${val}" ] && export "${var}=${val}"
+          done
+
           ./scripts/build.sh prometheus --push
   artifacts:
     - name: build-env
@@ -94,6 +182,7 @@ trivy-prometheus:
         description: Trivy vulnerability scan
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "prometheus: skipped upstream"; exit 0; }
           trivy image --exit-code 0 \
             --severity CRITICAL,HIGH \
             --format json --output trivy-report.json \
@@ -118,6 +207,7 @@ sbom-prometheus:
         description: Syft SBOM generation
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "prometheus: skipped upstream"; exit 0; }
           syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
           echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
   artifacts:
@@ -143,9 +233,10 @@ cosign-prometheus:
         description: Cosign sign + attestations
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "prometheus: skipped upstream"; exit 0; }
           TLOG_FLAG="--tlog-upload=false"
 
-          # Sign the image
+          # Sign the image by digest (IMAGE_DIGEST = name@sha256:...)
           cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
             -a "ci.build=${bamboo_buildResultKey}" \
             -a "ci.plan=${bamboo_planKey}" \
@@ -176,10 +267,11 @@ promote-prod-prometheus:
         description: Promote prometheus to production registry
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "prometheus: skipped upstream"; exit 0; }
           # Install crane
           curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
-          SRC="${TRIVY_IMAGE}"
-          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-prometheus}:${BUILDKIT_TAG}"
+          SRC="${IMAGE_DIGEST}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/prometheus:${BUILDKIT_TAG}"
           ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
           ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
           ./crane copy "${SRC}" "${DST}"
@@ -195,9 +287,31 @@ build-nginx:
         repository: container-images
     - script:
         interpreter: /bin/sh
-        description: Build and push nginx
+        description: Gate + build and push nginx
         body: |
-          export IMAGE_DIR=nginx
+          if [ "${bamboo_FORCE_ALL:-false}" != "true" ]; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD \
+              -- images/nginx/ global.env.example Dockerfile scripts/ 2>/dev/null || \
+              git diff --name-only HEAD -- images/nginx/ global.env.example Dockerfile scripts/)
+            if [ -z "$CHANGED" ]; then
+              echo "No changes for nginx — skipping"
+              echo "SKIP=true" > build.env
+              exit 0
+            fi
+          fi
+
+          for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
+                     APK_MIRROR APT_MIRROR CA_CERT \
+                     REGISTRY_KIND \
+                     ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
+                     ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PROPERTIES; do
+            bv="bamboo_${var}"
+            eval "val=\${${bv}:-}"
+            [ -n "${val}" ] && export "${var}=${val}"
+          done
+
           ./scripts/build.sh nginx --push
   artifacts:
     - name: build-env
@@ -218,6 +332,7 @@ trivy-nginx:
         description: Trivy vulnerability scan
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "nginx: skipped upstream"; exit 0; }
           trivy image --exit-code 0 \
             --severity CRITICAL,HIGH \
             --format json --output trivy-report.json \
@@ -242,6 +357,7 @@ sbom-nginx:
         description: Syft SBOM generation
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "nginx: skipped upstream"; exit 0; }
           syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
           echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
   artifacts:
@@ -267,6 +383,7 @@ cosign-nginx:
         description: Cosign sign + attestations
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "nginx: skipped upstream"; exit 0; }
           TLOG_FLAG="--tlog-upload=false"
 
           cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
@@ -285,6 +402,7 @@ cosign-nginx:
           fi
   requirements:
     - system.docker.executable
+
 promote-prod-nginx:
   tasks:
     - artifact-download:
@@ -296,9 +414,156 @@ promote-prod-nginx:
         description: Promote nginx to production registry
         body: |
           . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "nginx: skipped upstream"; exit 0; }
           curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
-          SRC="${TRIVY_IMAGE}"
-          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-nginx}:${BUILDKIT_TAG}"
+          SRC="${IMAGE_DIGEST}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/nginx:${BUILDKIT_TAG}"
+          ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
+          ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
+          ./crane copy "${SRC}" "${DST}"
+          echo "Promoted: ${DST}"
+  requirements:
+    - system.docker.executable
+
+# ── Sonarqube ─────────────────────────────────────────────────────────
+
+build-sonarqube:
+  tasks:
+    - checkout:
+        repository: container-images
+    - script:
+        interpreter: /bin/sh
+        description: Gate + build and push sonarqube
+        body: |
+          if [ "${bamboo_FORCE_ALL:-false}" != "true" ]; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD \
+              -- images/sonarqube/ global.env.example Dockerfile scripts/ 2>/dev/null || \
+              git diff --name-only HEAD -- images/sonarqube/ global.env.example Dockerfile scripts/)
+            if [ -z "$CHANGED" ]; then
+              echo "No changes for sonarqube — skipping"
+              echo "SKIP=true" > build.env
+              exit 0
+            fi
+          fi
+
+          for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
+                     APK_MIRROR APT_MIRROR CA_CERT \
+                     REGISTRY_KIND \
+                     ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
+                     ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PROPERTIES; do
+            bv="bamboo_${var}"
+            eval "val=\${${bv}:-}"
+            [ -n "${val}" ] && export "${var}=${val}"
+          done
+
+          ./scripts/build.sh sonarqube --push
+  artifacts:
+    - name: build-env
+      location: .
+      pattern: build.env
+      shared: true
+  requirements:
+    - system.docker.executable
+
+trivy-sonarqube:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Trivy vulnerability scan
+        body: |
+          . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          trivy image --exit-code 0 \
+            --severity CRITICAL,HIGH \
+            --format json --output trivy-report.json \
+            "${TRIVY_IMAGE}"
+          trivy image --exit-code 0 --severity CRITICAL,HIGH "${TRIVY_IMAGE}"
+  artifacts:
+    - name: trivy-report
+      location: .
+      pattern: trivy-report.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+sbom-sonarqube:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Syft SBOM generation
+        body: |
+          . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
+          echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
+  artifacts:
+    - name: sbom
+      location: .
+      pattern: sbom.cdx.json
+      shared: true
+  requirements:
+    - system.docker.executable
+
+cosign-sonarqube:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+          - name: trivy-report
+            destination: .
+          - name: sbom
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Cosign sign + attestations
+        body: |
+          . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          TLOG_FLAG="--tlog-upload=false"
+
+          cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
+            -a "ci.build=${bamboo_buildResultKey}" \
+            -a "ci.plan=${bamboo_planKey}" \
+            "${IMAGE_DIGEST}"
+
+          if [ -f sbom.cdx.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type cyclonedx \
+              --predicate sbom.cdx.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+
+          if [ -f trivy-report.json ]; then
+            cosign attest --key "${COSIGN_KEY}" --type vuln \
+              --predicate trivy-report.json --yes ${TLOG_FLAG} "${IMAGE_DIGEST}"
+          fi
+  requirements:
+    - system.docker.executable
+
+promote-prod-sonarqube:
+  tasks:
+    - artifact-download:
+        artifacts:
+          - name: build-env
+            destination: .
+    - script:
+        interpreter: /bin/sh
+        description: Promote sonarqube to production registry
+        body: |
+          . ./build.env
+          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
+          SRC="${IMAGE_DIGEST}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/sonarqube:${BUILDKIT_TAG}"
           ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
           ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
           ./crane copy "${SRC}" "${DST}"
