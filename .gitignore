@@ -19,3 +19,10 @@ certs/*.csr
 # Agent / editor runtime state
 .claude/
 build.env
+
+# Local workspace — test runners, credential exports, scratch
+# playbooks, and any other files that reference real hostnames,
+# team names, tokens, or other environment-specific values that
+# should never land in the public template. Keep anything you
+# don't want sanitized under local/ and it stays on your machine.
+local/

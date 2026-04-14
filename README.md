@@ -64,6 +64,27 @@ $EDITOR images/nginx/image.env
 variables via pipeline env vars instead of files still work without
 modification.
 
+**Local workspace (`local/`)**: for test runners, credential sourcing
+scripts, private CLI cheatsheets, or any other file that references
+real hostnames / team acronyms / tokens, create a `local/` directory
+at the repo root. The entire directory is gitignored (see `.gitignore`),
+so anything you put there stays on your machine and never needs
+sanitization before a push. Typical contents:
+
+```bash
+mkdir -p local
+# One-off: stash the vault lookups in a sourceable file
+cat > local/credentials.env <<'EOF'
+export VAULT_ADDR=https://vault.example.com:8200
+export PUSH_REGISTRY_USER=admin
+export PUSH_REGISTRY_PASSWORD=$(vault kv get -field=admin_password kv-mgt/apps/harbor/runtime)
+export ARTIFACTORY_USER=abcd
+export ARTIFACTORY_PASSWORD=$(vault kv get -field=abcd_password kv-mgt/apps/artifactory/runtime)
+export ARTIFACTORY_TEAM=abcd
+EOF
+source local/credentials.env    # then run any build.sh command
+```
+
 ### Build locally
 
 ```bash
