@@ -331,7 +331,7 @@ Required env at push time (hard fail if missing):
 | `ARTIFACTORY_URL` | e.g. `https://artifactory.example.com` |
 | `ARTIFACTORY_USER` | username with push rights to the target repo |
 | `ARTIFACTORY_TOKEN` **or** `ARTIFACTORY_PASSWORD` | access token (preferred) or basic-auth password |
-| `ARTIFACTORY_TEAM` | routing prefix — `newen`, `sdte`, etc. **Never committed to the repo**; every pipeline exports its own. |
+| `ARTIFACTORY_TEAM` | routing prefix — your team acronym (commonly a 4-letter code the platform team assigns). **Never committed to the repo**; every pipeline exports its own at runtime, so the same repo can push to different team repos depending on who's running it. |
 
 Optional:
 
@@ -342,22 +342,23 @@ Optional:
 | `ARTIFACTORY_BUILD_NUMBER` | `$CI_JOB_ID` / `$CI_PIPELINE_ID` / `$BUILD_NUMBER` / timestamp | Build number |
 | `ARTIFACTORY_PROPERTIES` | (none) | Extra `;`-separated props, e.g. `security.scan=pending;hardened=false` |
 
-Example (local shell against the homelab JCR):
+Example (local shell, assuming your team acronym is `abcd`):
 
 ```bash
 export REGISTRY_KIND=artifactory
 export ARTIFACTORY_URL=https://artifactory.example.com
-export ARTIFACTORY_USER=newen
-export ARTIFACTORY_TOKEN="$(vault kv get -field=token kv-mgt/apps/artifactory/runtime)"
-export ARTIFACTORY_TEAM=newen
+export ARTIFACTORY_USER=abcd                      # your team/service user
+export ARTIFACTORY_TOKEN="…"                      # access token (preferred)
+export ARTIFACTORY_TEAM=abcd
 export ARTIFACTORY_PROPERTIES="security.scan=pending;approval.status=draft"
 ./scripts/build.sh nginx --push
 ```
 
 Pulls the base, builds, tags as
-`artifactory.example.com/newen/nginx:1.27.5-alpine-<sha>`, pushes it,
-publishes build info, and tags the manifest with `team`, `environment`,
-`build.name`, `build.number`, `git.commit`, plus the props above.
+`artifactory.example.com/abcd/nginx:1.27.5-alpine-<sha>`, pushes it to
+the `abcd-docker-local` backing repo, publishes build info, and tags
+the manifest with `team`, `environment`, `build.name`, `build.number`,
+`git.commit`, plus the props above.
 
 **Pro vs Free (JCR).** The backend uses only APIs available on JCR
 Free. Property-based queries give the same traceability story that

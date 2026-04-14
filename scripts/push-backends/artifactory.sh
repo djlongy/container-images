@@ -37,7 +37,8 @@
 #   ARTIFACTORY_URL        e.g. https://artifactory.example.com
 #   ARTIFACTORY_USER       username with push rights to the target repo
 #   ARTIFACTORY_PASSWORD   (or ARTIFACTORY_TOKEN — access token preferred)
-#   ARTIFACTORY_TEAM       routing prefix (newen, sdte, jcom, shared, ...)
+#   ARTIFACTORY_TEAM       routing prefix (your team acronym — e.g. a
+#                          4-letter code the platform team assigns you)
 #
 # Optional env:
 #   ARTIFACTORY_ENVIRONMENT  dev|prod (default: dev → *-docker-local)
@@ -135,7 +136,7 @@ _artifactory_require_env() {
         ARTIFACTORY_TEAM)
           echo "  Set this as an env var in your pipeline/shell so each" >&2
           echo "  team gets their own target repo, e.g." >&2
-          echo "    export ARTIFACTORY_TEAM=newen" >&2
+          echo "    export ARTIFACTORY_TEAM=<your-team>   # e.g. a 4-letter acronym" >&2
           ;;
       esac
       missing=1

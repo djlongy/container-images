@@ -34,7 +34,7 @@
 #   ARTIFACTORY_USER         Team/service user with push rights
 #   ARTIFACTORY_TOKEN        Access token (preferred) OR
 #   ARTIFACTORY_PASSWORD     basic-auth password
-#   ARTIFACTORY_TEAM         Routing prefix (newen, sdte, jcom, ...)
+#   ARTIFACTORY_TEAM         Routing prefix — your team acronym
 #   ARTIFACTORY_ENVIRONMENT  dev|prod → -docker-local / -docker-prod
 #   ARTIFACTORY_PROPERTIES   Extra ;-separated props (optional)
 #
