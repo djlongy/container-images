@@ -300,6 +300,75 @@ For images that need build logic beyond what the shared template provides
 The custom Dockerfile has access to the full repo as build context
 (including `certs/`).
 
+### Registry backends (optional enrichment)
+
+`build.sh --push` defaults to a plain `docker push` against
+`${PUSH_REGISTRY}/${PUSH_PROJECT}/<image>:<tag>` — the Harbor baseline,
+no bells and whistles. If your target registry supports extra metadata
+(structured properties, build info, multi-tenant routing), you can
+opt in by setting `REGISTRY_KIND`:
+
+```bash
+REGISTRY_KIND="${REGISTRY_KIND:-}"
+# Supported: artifactory
+```
+
+When set, `build.sh` delegates the push step to
+`scripts/push-backends/${REGISTRY_KIND}.sh` which exposes a
+`push_to_backend()` function. Adding a new backend is dropping a new
+file into that directory — no changes to `build.sh` itself.
+
+#### artifactory
+
+Routes the image through JFrog Artifactory / JCR, captures build info
+(git SHA, branch, env vars via `jf rt bp --collect-env --collect-git-info`),
+and tags the manifest with structured properties for downstream queries.
+
+Required env at push time (hard fail if missing):
+
+| Var | Purpose |
+|---|---|
+| `ARTIFACTORY_URL` | e.g. `https://artifactory.example.com` |
+| `ARTIFACTORY_USER` | username with push rights to the target repo |
+| `ARTIFACTORY_TOKEN` **or** `ARTIFACTORY_PASSWORD` | access token (preferred) or basic-auth password |
+| `ARTIFACTORY_TEAM` | routing prefix — `newen`, `sdte`, etc. **Never committed to the repo**; every pipeline exports its own. |
+
+Optional:
+
+| Var | Default | Purpose |
+|---|---|---|
+| `ARTIFACTORY_ENVIRONMENT` | `dev` | `dev` → `<team>-docker-local`, `prod` → `<team>-docker-prod` |
+| `ARTIFACTORY_BUILD_NAME` | `${IMAGE_NAME}` | Build name in Artifactory UI |
+| `ARTIFACTORY_BUILD_NUMBER` | `$CI_JOB_ID` / `$CI_PIPELINE_ID` / `$BUILD_NUMBER` / timestamp | Build number |
+| `ARTIFACTORY_PROPERTIES` | (none) | Extra `;`-separated props, e.g. `security.scan=pending;hardened=false` |
+
+Example (local shell against the homelab JCR):
+
+```bash
+export REGISTRY_KIND=artifactory
+export ARTIFACTORY_URL=https://artifactory.example.com
+export ARTIFACTORY_USER=newen
+export ARTIFACTORY_TOKEN="$(vault kv get -field=token kv-mgt/apps/artifactory/runtime)"
+export ARTIFACTORY_TEAM=newen
+export ARTIFACTORY_PROPERTIES="security.scan=pending;approval.status=draft"
+./scripts/build.sh nginx --push
+```
+
+Pulls the base, builds, tags as
+`artifactory.example.com/newen/nginx:1.27.5-alpine-<sha>`, pushes it,
+publishes build info, and tags the manifest with `team`, `environment`,
+`build.name`, `build.number`, `git.commit`, plus the props above.
+
+**Pro vs Free (JCR).** The backend uses only APIs available on JCR
+Free. Property-based queries give the same traceability story that
+Pro's module-linkage build-info provides — a `jf rt search` by
+`build.name` / `build.number` / `git.commit` finds exactly the same
+images. If you're on Pro and want Pro's layer-level module linkage in
+the build info, run `jf rt bdc "${BUILD_NAME}" "${BUILD_NUMBER}"`
+yourself after the push — the backend skips it by default because
+the underlying repo-detail API call is Pro-only and would break the
+Free path.
+
 ## image.env Reference
 
 ```bash

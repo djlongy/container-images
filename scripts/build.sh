@@ -143,7 +143,11 @@ for __v in \
   PROD_PUSH_REGISTRY PROD_PUSH_PROJECT \
   IMAGE_NAME TAG DISTRO SOURCE \
   REMEDIATE INJECT_CERTS ORIGINAL_USER CUSTOM_DOCKERFILE \
-  VAULT_KV_MOUNT VAULT_CA_PATH CA_CERT
+  VAULT_KV_MOUNT VAULT_CA_PATH CA_CERT \
+  REGISTRY_KIND \
+  ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD ARTIFACTORY_TOKEN \
+  ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+  ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER ARTIFACTORY_PROPERTIES
 do
   # Only snapshot if the variable is actually set in the shell (not unset).
   # This distinguishes "user exported it" from "file will set it".
@@ -358,10 +362,35 @@ docker inspect "${FULL_IMAGE}" --format='{{json .Config.Labels}}' | python3 -m j
   docker inspect "${FULL_IMAGE}" --format='{{json .Config.Labels}}'
 
 # ── Push (optional) ──────────────────────────────────────────────────
+#
+# Default (REGISTRY_KIND unset) = plain `docker push` to the baseline
+# push target built into FULL_IMAGE — the Harbor flow everyone's been
+# using. Opt-in to registry-specific enrichment (build info, metadata
+# properties, team routing) by setting REGISTRY_KIND to a supported
+# backend. Backends live in scripts/push-backends/<kind>.sh and must
+# expose a push_to_backend() function that takes the locally-built
+# image tag as its single argument.
 
 if [ "${PUSH}" = "true" ]; then
-  echo ""
-  echo "=== Pushing to ${PUSH_REGISTRY} ==="
-  docker push "${FULL_IMAGE}"
-  echo "Pushed: ${FULL_IMAGE}"
+  if [ -n "${REGISTRY_KIND:-}" ]; then
+    BACKEND_SCRIPT="${REPO_ROOT}/scripts/push-backends/${REGISTRY_KIND}.sh"
+    if [ ! -f "${BACKEND_SCRIPT}" ]; then
+      echo "ERROR: unknown REGISTRY_KIND='${REGISTRY_KIND}'" >&2
+      echo "  Expected: ${BACKEND_SCRIPT}" >&2
+      echo "  Available: $(ls "${REPO_ROOT}/scripts/push-backends/"*.sh 2>/dev/null | xargs -n1 basename | sed 's/\.sh$//' | tr '\n' ' ')" >&2
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "${BACKEND_SCRIPT}"
+    if ! command -v push_to_backend >/dev/null 2>&1; then
+      echo "ERROR: ${BACKEND_SCRIPT} does not define push_to_backend()" >&2
+      exit 1
+    fi
+    push_to_backend "${FULL_IMAGE}"
+  else
+    echo ""
+    echo "=== Pushing to ${PUSH_REGISTRY} ==="
+    docker push "${FULL_IMAGE}"
+    echo "Pushed: ${FULL_IMAGE}"
+  fi
 fi
