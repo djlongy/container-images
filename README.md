@@ -33,14 +33,31 @@ The `ci.yml` is auto-generated from `.ci/image-ci.yml.template` — never edit
 it by hand. To change the pipeline structure for all images, edit the template
 and run `./scripts/add-image.sh --regenerate`.
 
+### First clone — create your local config
+
+`global.env` is gitignored so your real registry hostnames, proxy URLs,
+and vendor strings never get committed. On a fresh clone:
+
+```bash
+cp global.env.example global.env
+$EDITOR global.env     # set PULL_REGISTRY, PUSH_REGISTRY, etc.
+```
+
+`build.sh`, `check-updates.sh`, and the CI templates fall back to
+`global.env.example` when `global.env` doesn't exist, so CI runners
+that populate variables via pipeline env vars instead of a file still
+work without modification.
+
 ### Build locally
 
 ```bash
-export PULL_REGISTRY="harbor.example.com"   # Proxy/cache we pull FROM
-export PUSH_REGISTRY="harbor.example.com"   # Registry we push TO
+# Values come from global.env; shell exports still win as overrides
 ./scripts/build.sh prometheus             # Build only
 ./scripts/build.sh prometheus --push      # Build and push
 ./scripts/build.sh --list                 # List available images
+
+# One-off override without editing global.env
+PULL_REGISTRY=harbor.example.com ./scripts/build.sh nginx
 ```
 
 ### Check for updates
@@ -89,7 +106,8 @@ All settings come from environment variables or CI/CD pipeline variables.
 container-images/
 ├── Dockerfile              # Shared template (labels + remediation + certs)
 ├── certs/                  # CA certs injected at build time (gitignored)
-├── global.env              # Default config (PULL_REGISTRY, PUSH_REGISTRY, PUSH_PROJECT, VENDOR)
+├── global.env.example      # Versioned template — cp to global.env and edit
+├── global.env              # Local overrides (gitignored)
 ├── .ci/
 │   └── promote.yml         # Reusable CI template (sources image.env at runtime)
 ├── scripts/

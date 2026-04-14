@@ -17,6 +17,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
+# Resolve which global env file to source. global.env is gitignored so
+# local homelab defaults stay out of the repo; global.env.example is the
+# versioned template. On first clone, copy the template:
+#   cp global.env.example global.env
+# and edit for your environment. CI systems can either cp in the job or
+# set all variables as pipeline variables and skip the file.
+resolve_global_env() {
+  if [ -f "${REPO_ROOT}/global.env" ]; then
+    printf '%s' "${REPO_ROOT}/global.env"
+  elif [ -f "${REPO_ROOT}/global.env.example" ]; then
+    printf '%s' "${REPO_ROOT}/global.env.example"
+  else
+    echo "ERROR: neither global.env nor global.env.example found in ${REPO_ROOT}" >&2
+    exit 1
+  fi
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 usage() {
@@ -85,7 +102,7 @@ fi
 
 # Source global vars then image-specific vars (image overrides global)
 # shellcheck source=/dev/null
-source "${REPO_ROOT}/global.env"
+source "$(resolve_global_env)"
 # shellcheck source=/dev/null
 source "${IMAGE_DIR}/image.env"
 

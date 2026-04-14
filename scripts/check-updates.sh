@@ -104,9 +104,12 @@ for IMAGE_DIR in "${REPO_ROOT}"/images/*/; do
 
   [ -f "${ENV_FILE}" ] || continue
 
-  # Source to get TAG and SOURCE
+  # Source to get TAG and SOURCE — prefer local global.env, fall back to
+  # the versioned global.env.example template for fresh clones / CI.
+  GLOBAL_ENV_FILE="${REPO_ROOT}/global.env"
+  [ -f "${GLOBAL_ENV_FILE}" ] || GLOBAL_ENV_FILE="${REPO_ROOT}/global.env.example"
   # shellcheck source=/dev/null
-  source "${REPO_ROOT}/global.env"
+  source "${GLOBAL_ENV_FILE}"
   # shellcheck source=/dev/null
   source "${ENV_FILE}"
 

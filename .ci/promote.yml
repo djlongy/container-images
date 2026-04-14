@@ -28,7 +28,7 @@
     IMAGE_DIR: ""
   script:
     # Source config — image.env is the single source of truth
-    - source global.env
+    - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
     - source "images/${IMAGE_DIR}/image.env"
     - |
       FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}"
@@ -235,7 +235,7 @@
     name: gcr.io/go-containerregistry/crane:debug
     entrypoint: [""]
   script:
-    - source global.env
+    - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
     - source "images/${IMAGE_DIR}/image.env"
     - |
       PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"

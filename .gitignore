@@ -1,5 +1,14 @@
+# Local environment overrides (copy from global.env.example on first clone)
+global.env
+
 # CA certificates — injected at build time from CI variables or Vault
 # Never commit certs to the repo (may be pushed to public GitHub)
 certs/*.crt
 certs/*.pem
+certs/*.srl
+certs/*.key
+certs/*.csr
 !certs/.gitkeep
+
+# Agent / editor runtime state
+.claude/
