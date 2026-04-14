@@ -80,10 +80,13 @@ cat > "${IMAGE_DIR}/image.env" << ENVEOF
 # ── Required: pull and build ──────────────────────────────────────────
 IMAGE_NAME="${NAME}"
 TAG="TODO"
+# DISTRO controls which remediation script is applied when REMEDIATE=true.
+# One of: alpine, debian, ubuntu, ubi, busybox, scratch
+DISTRO="TODO"
 SOURCE="\${PULL_REGISTRY}/docker-hub/library/${NAME}"
 
 # ── Optional: registry destination ───────────────────────────────────
-# PUSH_PROJECT="cDSS"
+# PUSH_PROJECT="myproject"
 
 # ── Optional: custom labels ──────────────────────────────────────────
 # Create images/${NAME}/labels.env with one key=value per line.
@@ -93,7 +96,7 @@ SOURCE="\${PULL_REGISTRY}/docker-hub/library/${NAME}"
 # ORIGINAL_USER="root"
 # INJECT_CERTS="false"
 ENVEOF
-echo "  Created:   images/${NAME}/image.env (edit TAG and SOURCE)"
+echo "  Created:   images/${NAME}/image.env (edit TAG, DISTRO and SOURCE)"
 
 # Generate ci.yml from template
 generate_ci "${NAME}"

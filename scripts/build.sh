@@ -52,16 +52,23 @@ EOF
 }
 
 list_images() {
+  # Source global env ONCE so ${PULL_REGISTRY} (referenced by SOURCE in
+  # each image.env) expands. Each per-image source runs in a subshell so
+  # variables from one image.env don't leak into the next iteration.
+  # shellcheck source=/dev/null
+  source "$(resolve_global_env)"
   echo "Available images:"
   for dir in "${REPO_ROOT}"/images/*/; do
     name="$(basename "${dir}")"
-    if [ -f "${dir}/image.env" ]; then
+    [ -f "${dir}/image.env" ] || continue
+    (
       # shellcheck source=/dev/null
       source "${dir}/image.env"
-      certs_flag=""
-      [ "${INJECT_CERTS:-false}" = "true" ] && certs_flag=" [+certs]"
-      printf "  %-20s %s%s\n" "${name}" "${SOURCE}:${TAG}" "${certs_flag}"
-    fi
+      flags=""
+      [ "${REMEDIATE:-false}"    = "true" ] && flags="${flags} [+remediate:${DISTRO:-?}]"
+      [ "${INJECT_CERTS:-false}" = "true" ] && flags="${flags} [+certs]"
+      printf "  %-20s %s%s\n" "${name}" "${SOURCE}:${TAG}" "${flags}"
+    )
   done
   exit 0
 }
@@ -111,15 +118,54 @@ source "${IMAGE_DIR}/image.env"
 GIT_SHORT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo "local")"
 GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo "unknown")"
 PROMOTED_TAG="${TAG}-${GIT_SHORT_SHA}"
-FULL_IMAGE="${REGISTRY}/${REGISTRY_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
+FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
 BASE_IMAGE="${SOURCE}:${TAG}"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Preflight: validate remediate.sh exists if REMEDIATE=true
-if [ "${REMEDIATE:-false}" = "true" ] && [ ! -f "${IMAGE_DIR}/remediate.sh" ]; then
-  echo "ERROR: REMEDIATE=true but ${IMAGE_DIR}/remediate.sh does not exist" >&2
-  echo "Create the script or set REMEDIATE=false in image.env" >&2
-  exit 1
+# Preflight: validate DISTRO + resolve remediate.sh
+#
+# Each image must declare its base DISTRO in image.env (alpine, debian,
+# ubuntu, ubi, busybox, scratch, …) so we know which package manager to
+# drive when REMEDIATE=true. Resolution order for the script:
+#
+#   1. images/<name>/remediate.sh        — per-image override wins
+#   2. scripts/remediate/${DISTRO}.sh    — shared distro default
+#   3. Hard error if neither exists.
+#
+# The resolved script is copied into images/<name>/remediate.sh so the
+# Dockerfile's unconditional COPY finds it at a stable path. A trap at
+# the bottom of the script removes any script we materialised so it
+# doesn't leak into the repo.
+REMEDIATE_CLEANUP=""
+trap '[ -n "${REMEDIATE_CLEANUP}" ] && rm -f "${REMEDIATE_CLEANUP}"' EXIT
+
+if [ "${REMEDIATE:-false}" = "true" ]; then
+  if [ -z "${DISTRO:-}" ]; then
+    echo "ERROR: DISTRO not set in images/${IMAGE}/image.env (required when REMEDIATE=true)" >&2
+    echo "Set DISTRO to one of: alpine, debian, ubuntu, ubi" >&2
+    exit 1
+  fi
+  if [ -f "${IMAGE_DIR}/remediate.sh" ]; then
+    echo "  Remediation:  images/${IMAGE}/remediate.sh (per-image)"
+  elif [ -f "${REPO_ROOT}/scripts/remediate/${DISTRO}.sh" ]; then
+    cp "${REPO_ROOT}/scripts/remediate/${DISTRO}.sh" "${IMAGE_DIR}/remediate.sh"
+    REMEDIATE_CLEANUP="${IMAGE_DIR}/remediate.sh"
+    echo "  Remediation:  scripts/remediate/${DISTRO}.sh (distro default)"
+  else
+    echo "ERROR: REMEDIATE=true but no remediation script found" >&2
+    echo "  Expected one of:" >&2
+    echo "    ${IMAGE_DIR}/remediate.sh           (per-image override)" >&2
+    echo "    ${REPO_ROOT}/scripts/remediate/${DISTRO}.sh  (distro default)" >&2
+    exit 1
+  fi
+elif [ ! -f "${IMAGE_DIR}/remediate.sh" ]; then
+  # REMEDIATE=false and no per-image script — drop a no-op so the
+  # Dockerfile's unconditional COPY images/<name>/remediate.sh succeeds.
+  # The base-remediated stage that would execute it is pruned from the
+  # final image by the multi-stage final selector.
+  printf '#!/bin/sh\n# placeholder — REMEDIATE=false, this file is never executed\nexit 0\n' \
+    > "${IMAGE_DIR}/remediate.sh"
+  REMEDIATE_CLEANUP="${IMAGE_DIR}/remediate.sh"
 fi
 
 # Select Dockerfile: custom per-image or shared root
@@ -181,13 +227,14 @@ docker build \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
   --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE:-alpine:3.21}" \
   --build-arg "APK_MIRROR=${APK_MIRROR:-}" \
+  --build-arg "APT_MIRROR=${APT_MIRROR:-}" \
   --build-arg "TAG=${TAG}" \
   --build-arg "APP_VERSION=${PROMOTED_TAG}" \
   --build-arg "VENDOR=${VENDOR:-}" \
   --build-arg "VCS_REF=${GIT_SHA}" \
   --build-arg "BUILD_DATE=${BUILD_DATE}" \
   --build-arg "REMEDIATE=${REMEDIATE:-false}" \
-  --build-arg "IMAGE_DIR=images/${IMAGE}" \
+  --build-arg "IMAGE_DIR=${IMAGE}" \
   --build-arg "INJECT_CERTS=${INJECT_CERTS:-false}" \
   --build-arg "ORIGINAL_USER=${ORIGINAL_USER:-root}" \
   ${LABEL_FLAGS} \
@@ -208,7 +255,7 @@ docker inspect "${FULL_IMAGE}" --format='{{json .Config.Labels}}' | python3 -m j
 
 if [ "${PUSH}" = "true" ]; then
   echo ""
-  echo "=== Pushing to ${REGISTRY} ==="
+  echo "=== Pushing to ${PUSH_REGISTRY} ==="
   docker push "${FULL_IMAGE}"
   echo "Pushed: ${FULL_IMAGE}"
 fi

@@ -32,9 +32,10 @@
 #   passed --build-arg REMEDIATE=true, which takes priority.
 # ─────────────────────────────────────────────────────────────────────
 
-ARG BASE_IMAGE                  # Set by CI/build.sh from SOURCE:TAG
+ARG BASE_IMAGE=scratch          # Always overridden by CI/build.sh from SOURCE:TAG; placeholder silences InvalidDefaultArgInFrom
 ARG BUILDER_IMAGE=alpine:3.21   # Overridden from global.env via registry proxy
 ARG APK_MIRROR=""               # Overridden from global.env — replaces dl-cdn.alpinelinux.org/alpine
+ARG APT_MIRROR=""               # Overridden from global.env — rewrites /etc/apt/sources.list* to Nexus apt-proxy
 ARG INJECT_CERTS=false          # Overridden per image via image.env
 ARG REMEDIATE=false             # Overridden per image via image.env
 
@@ -94,14 +95,17 @@ LABEL promoted.tag="${APP_VERSION}"
 FROM base AS base-remediated
 ARG ORIGINAL_USER="root"        # Overridden from image.env
 ARG IMAGE_DIR=""                # Overridden by CI/build.sh (e.g. "nginx")
-ARG APK_MIRROR=""
+ARG APK_MIRROR=""               # Read by scripts/remediate/alpine.sh via env
+ARG APT_MIRROR=""               # Read by scripts/remediate/{debian,ubuntu}.sh via env
 USER root
 COPY certs/*.crt /tmp/custom-ca/
 RUN cat /tmp/custom-ca/*.crt >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
 COPY images/${IMAGE_DIR}/remediate.sh /tmp/remediate.sh
-RUN if [ -n "${APK_MIRROR}" ] && [ -f /etc/apk/repositories ]; then \
-      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${APK_MIRROR}|g" /etc/apk/repositories; \
-    fi && \
+# Remediation is distro-specific — the script handles its own package
+# manager and any mirror/repo rewrites. APK_MIRROR / APT_MIRROR are
+# exported so the relevant distro script can consume them; other distros
+# ignore whichever doesn't apply.
+RUN export APK_MIRROR="${APK_MIRROR}" APT_MIRROR="${APT_MIRROR}" && \
     chmod +x /tmp/remediate.sh && /tmp/remediate.sh && rm -f /tmp/remediate.sh
 USER ${ORIGINAL_USER}
 

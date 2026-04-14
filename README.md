@@ -130,28 +130,40 @@ Docker conditional multi-stage builds ensure unused features add zero layers.
 ### CVE Remediation
 
 Patch OS-level vulnerabilities without waiting for an upstream release.
-Each image gets its own `remediate.sh` script that runs targeted package
-upgrades. The shared Dockerfile runs it as a conditional build stage.
+Remediation is **distro-aware**: each image declares `DISTRO` in `image.env`
+and `build.sh` picks the matching default script from `scripts/remediate/`.
+An image that needs custom logic can drop its own `images/<name>/remediate.sh`
+to override the default.
 
-1. Create `images/<name>/remediate.sh`:
+**Resolution order when `REMEDIATE=true`:**
+
+1. `images/<name>/remediate.sh` — per-image override (wins if present)
+2. `scripts/remediate/${DISTRO}.sh` — shared distro default
+3. Hard error if neither exists
+
+**Shipped defaults:**
+
+| DISTRO | Script | Command |
+|--------|--------|---------|
+| `alpine` | `scripts/remediate/alpine.sh` | `apk upgrade --no-cache` |
+| `debian` | `scripts/remediate/debian.sh` | `apt-get -y --only-upgrade upgrade` |
+| `ubuntu` | `scripts/remediate/ubuntu.sh` | `apt-get -y --only-upgrade upgrade` |
+| `ubi` | `scripts/remediate/ubi.sh` | `microdnf -y update` (or `dnf`) |
+
+**Usage:**
+
+1. Set flags in `image.env`:
    ```bash
-   #!/bin/sh
-   # Alpine — upgrade vulnerable packages
-   apk upgrade --no-cache libcrypto3 libssl3 libxml2
-
-   # Debian — same idea
-   # apt-get update && apt-get install -y --only-upgrade libssl3 && rm -rf /var/lib/apt/lists/*
-   ```
-
-2. Set flags in `image.env`:
-   ```bash
+   DISTRO="alpine"          # Required — chooses the remediation script
    REMEDIATE="true"
    ORIGINAL_USER="nginx"    # Upstream USER to restore after patching
    ```
 
-3. Push to `main` — the image rebuilds with patches applied.
+2. Push to `main` — the image rebuilds with the distro default applied.
 
-When upstream releases a fix, bump `TAG` and delete `remediate.sh`.
+3. (Optional) Drop `images/<name>/remediate.sh` for image-specific patches.
+
+When upstream releases a fix, bump `TAG` and remove any per-image script.
 
 **Note:** This only works for OS-level CVEs (Alpine/Debian packages). CVEs
 in compiled binaries (Go stdlib, Rust deps) require an upstream release —
@@ -275,13 +287,14 @@ The custom Dockerfile has access to the full repo as build context
 
 ```bash
 # ── Required: used to pull and build the image ────────────────────────
-IMAGE_NAME="prometheus"                             # Repo name in target registry
-TAG="v3.11.0"                                       # Upstream tag to pull
+IMAGE_NAME="prometheus"                                   # Repo name in target registry
+TAG="v3.11.0"                                             # Upstream tag to pull
+DISTRO="busybox"                                          # Base distro (alpine|debian|ubuntu|ubi|busybox|scratch)
 SOURCE="${PULL_REGISTRY}/docker-hub/prom/prometheus"      # Pull path (via proxy/cache)
 
 # ── Optional: registry destination ───────────────────────────────────
 # Override global PUSH_PROJECT for per-tenant or per-team paths.
-# PUSH_PROJECT="cDSS"    # → registry.example.com/cDSS/prometheus
+# PUSH_PROJECT="myproject"    # → ${PUSH_REGISTRY}/myproject/prometheus
 
 # ── Optional: custom labels ──────────────────────────────────────────
 # Create images/<name>/labels.env with one key=value per line.
