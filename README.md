@@ -358,10 +358,52 @@ Optional:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `ARTIFACTORY_ENVIRONMENT` | `dev` | `dev` → `<team>-docker-local`, `prod` → `<team>-docker-prod` |
+| `ARTIFACTORY_PUSH_HOST` | host portion of `ARTIFACTORY_URL` | Docker push hostname. Override for subdomain layouts (e.g. `docker.artifactory.example.com`). |
+| `ARTIFACTORY_IMAGE_REF` | Layout A fallback | Shell-template for the docker push URL. See "Switching layouts" below. |
+| `ARTIFACTORY_MANIFEST_PATH` | Layout A fallback | Shell-template for the REST storage path used by `jf rt set-props`. |
+| `ARTIFACTORY_ENVIRONMENT` | `dev` | Exposed to templates as `${ARTIFACTORY_ENVIRONMENT}`; derived `${ARTIFACTORY_REPO_SUFFIX}` maps `dev`→`local`, `prod`→`prod`. Layouts that don't split dev/prod simply don't reference either var. |
 | `ARTIFACTORY_BUILD_NAME` | `${IMAGE_NAME}` | Build name in Artifactory UI |
 | `ARTIFACTORY_BUILD_NUMBER` | `$CI_JOB_ID` / `$CI_PIPELINE_ID` / `$BUILD_NUMBER` / timestamp | Build number |
 | `ARTIFACTORY_PROPERTIES` | (none) | Extra `;`-separated props, e.g. `security.scan=pending;hardened=false` |
+
+##### Switching layouts
+
+The backend has zero hardcoded repo paths. Both the docker push URL and
+the REST storage path are resolved from shell-parameter-expansion
+templates you supply via `ARTIFACTORY_IMAGE_REF` and
+`ARTIFACTORY_MANIFEST_PATH`. Template variables available inside them:
+`${ARTIFACTORY_PUSH_HOST}`, `${ARTIFACTORY_TEAM}`,
+`${ARTIFACTORY_ENVIRONMENT}`, `${ARTIFACTORY_REPO_SUFFIX}`,
+`${IMAGE_NAME}`, `${IMAGE_TAG}`.
+
+`global.env.example` ships with **five named presets** — copy it to
+`global.env` (gitignored) and uncomment the block for whichever layout
+matches your Artifactory setup. Leaving all five commented falls back
+to Layout A so existing configs keep working.
+
+| Preset | Docker push URL | Storage path |
+|---|---|---|
+| **A** Per-team repos *(default fallback)* | `host/<team>/<image>:<tag>` | `<team>-docker-<suffix>/<image>/<tag>/manifest.json` |
+| **B** Shared repo with team subfolder | `host/docker/<team>/<image>:<tag>` | `docker/<team>/<image>/<tag>/manifest.json` |
+| **C** Subdomain-routed shared repo *(JFrog recommended)* | `docker.host/<team>/<image>:<tag>` | `docker/<team>/<image>/<tag>/manifest.json` |
+| **D** Subdomain-per-team | `<team>.host/<image>:<tag>` | `<team>-docker-<suffix>/<image>/<tag>/manifest.json` |
+| **E** Team-dispatch subdomain | `docker.host/<team>/<image>:<tag>` | `<team>-docker-<suffix>/<image>/<tag>/manifest.json` *(team segment stripped by sidecar before storage — requires an external nginx `map` that rewrites host+path→repo)* |
+
+Templates must be **single-quoted** in `global.env` so `${VAR}` stays
+literal until `build.sh` expands it. Shell exports override file
+values, so you can test a different layout per-invocation without
+editing the file:
+
+```bash
+export ARTIFACTORY_PUSH_HOST=docker.artifactory.example.com
+export ARTIFACTORY_IMAGE_REF='${ARTIFACTORY_PUSH_HOST}/${ARTIFACTORY_TEAM}/${IMAGE_NAME}:${IMAGE_TAG}'
+export ARTIFACTORY_MANIFEST_PATH='${ARTIFACTORY_TEAM}-docker-local/${IMAGE_NAME}/${IMAGE_TAG}/manifest.json'
+./scripts/build.sh prometheus --push
+```
+
+Whichever layout you pick, RBAC at the backing Artifactory repo still
+applies — the template resolves the URL, but Artifactory decides
+whether the push succeeds.
 
 Example (local shell, assuming your team acronym is `abcd`):
 
@@ -375,11 +417,13 @@ export ARTIFACTORY_PROPERTIES="security.scan=pending;approval.status=draft"
 ./scripts/build.sh nginx --push
 ```
 
-Pulls the base, builds, tags as
+With no `ARTIFACTORY_IMAGE_REF` / `ARTIFACTORY_MANIFEST_PATH` set, this
+falls through to Layout A: pulls the base, builds, tags as
 `artifactory.example.com/abcd/nginx:1.27.5-alpine-<sha>`, pushes it to
 the `abcd-docker-local` backing repo, publishes build info, and tags
 the manifest with `team`, `environment`, `build.name`, `build.number`,
-`git.commit`, plus the props above.
+`git.commit`, plus the props above. Other layouts push to the URL/repo
+their templates resolve to — see "Switching layouts" above.
 
 **Pro vs Free (JCR).** The backend uses only APIs available on JCR
 Free. Property-based queries give the same traceability story that
