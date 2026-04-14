@@ -55,11 +55,11 @@ for t in data.get('results', []):
 " 2>/dev/null
   else
     # Generic v2 registry — use tags/list endpoint
-    local REGISTRY HOST REPO_PATH
+    local HOST REPO_PATH
     HOST=$(echo "${IMAGE_PATH}" | cut -d/ -f1)
     REPO_PATH=$(echo "${IMAGE_PATH}" | cut -d/ -f2-)
-    if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-      AUTH_HEADER="Basic $(echo -n "${REGISTRY_USER}:${REGISTRY_PASSWORD}" | base64)"
+    if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+      AUTH_HEADER="Basic $(echo -n "${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}" | base64)"
       curl -sf -H "Authorization: ${AUTH_HEADER}" \
         "https://${HOST}/v2/${REPO_PATH}/tags/list" 2>/dev/null \
         | python3 -c "import sys, json; [print(t) for t in json.load(sys.stdin).get('tags', [])]" 2>/dev/null
@@ -112,7 +112,7 @@ for IMAGE_DIR in "${REPO_ROOT}"/images/*/; do
 
   CURRENT_TAG="${TAG}"
   # Determine the upstream source path for tag lookup
-  # SOURCE may contain ${REGISTRY} variable — resolve or use raw
+  # SOURCE may contain ${PULL_REGISTRY} variable — resolve or use raw
   RESOLVED_SOURCE=$(eval echo "${SOURCE}" 2>/dev/null || echo "${SOURCE}")
 
   echo "Checking ${IMAGE_NAME} (current: ${CURRENT_TAG})..."

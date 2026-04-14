@@ -31,7 +31,7 @@
     - source global.env
     - source "images/${IMAGE_DIR}/image.env"
     - |
-      FULL_IMAGE="${REGISTRY}/${REGISTRY_PROJECT}/${IMAGE_NAME}"
+      FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}"
       PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
       BASE="${SOURCE}:${TAG}"
       echo "=== Promoting ${IMAGE_NAME} ==="
@@ -73,10 +73,10 @@
     # Registry auth
     - mkdir -p /root/.docker
     - |
-      if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-        AUTH=$(echo -n "${REGISTRY_USER}:${REGISTRY_PASSWORD}" | base64)
+      if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+        AUTH=$(echo -n "${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}" | base64)
         cat > /root/.docker/config.json <<DOCKEREOF
-      {"auths":{"${REGISTRY}":{"auth":"${AUTH}"}}}
+      {"auths":{"${PUSH_REGISTRY}":{"auth":"${AUTH}"}}}
       DOCKEREOF
       fi
     # Build custom labels from labels.env file (one key=value per line)
@@ -128,15 +128,15 @@
     - |
       DIGEST=""
       REPO_PATH=$(echo "${FULL_IMAGE}" | cut -d/ -f2-)
-      if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-        AUTH_HEADER="Basic $(echo -n "${REGISTRY_USER}:${REGISTRY_PASSWORD}" | base64)"
+      if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+        AUTH_HEADER="Basic $(echo -n "${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}" | base64)"
         for ACCEPT_TYPE in \
           "application/vnd.oci.image.manifest.v1+json" \
           "application/vnd.docker.distribution.manifest.v2+json"; do
           HEADERS=$(wget -q --header="Authorization: ${AUTH_HEADER}" \
             --header="Accept: ${ACCEPT_TYPE}" \
             --server-response -O /dev/null \
-            "https://${REGISTRY}/v2/${REPO_PATH}/manifests/${PROMOTED_TAG}" 2>&1 || true)
+            "https://${PUSH_REGISTRY}/v2/${REPO_PATH}/manifests/${PROMOTED_TAG}" 2>&1 || true)
           # Match the sha256 digest directly — registry-agnostic, no header parsing
           # Uses -E (extended regex) for busybox/Alpine grep compatibility
           DIGEST=$(echo "${HEADERS}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 || true)
@@ -220,10 +220,10 @@
 # Requires manual approval — the job won't run until someone clicks "play".
 #
 # CI variables needed:
-#   PROD_REGISTRY          — production registry hostname
-#   PROD_REGISTRY_PROJECT  — project/path in prod registry (defaults to REGISTRY_PROJECT)
-#   PROD_REGISTRY_USER     — prod registry username
-#   PROD_REGISTRY_PASSWORD — prod registry password
+#   PROD_PUSH_REGISTRY          — production registry hostname
+#   PROD_PUSH_PROJECT  — project/path in prod registry (defaults to PUSH_PROJECT)
+#   PROD_PUSH_REGISTRY_USER     — prod registry username
+#   PROD_PUSH_REGISTRY_PASSWORD — prod registry password
 #
 # Set ENABLE_PROD_PROMOTE=true as a CI variable to enable the promote stage.
 # Without it, promote jobs are skipped (safe default for repos that don't
@@ -239,18 +239,18 @@
     - source "images/${IMAGE_DIR}/image.env"
     - |
       PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
-      SRC="${REGISTRY}/${REGISTRY_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
-      DST="${PROD_REGISTRY}/${PROD_REGISTRY_PROJECT:-${REGISTRY_PROJECT}}/${IMAGE_NAME}:${PROMOTED_TAG}"
+      SRC="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
+      DST="${PROD_PUSH_REGISTRY}/${PROD_PUSH_PROJECT:-${PUSH_PROJECT}}/${IMAGE_NAME}:${PROMOTED_TAG}"
       echo "=== Promoting to production ==="
       echo "  Source: ${SRC}"
       echo "  Dest:   ${DST}"
     # Authenticate to both registries
     - |
-      if [ -n "${REGISTRY_USER:-}" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
-        crane auth login "${REGISTRY}" -u "${REGISTRY_USER}" -p "${REGISTRY_PASSWORD}"
+      if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+        crane auth login "${PUSH_REGISTRY}" -u "${PUSH_REGISTRY_USER}" -p "${PUSH_REGISTRY_PASSWORD}"
       fi
-      if [ -n "${PROD_REGISTRY_USER:-}" ] && [ -n "${PROD_REGISTRY_PASSWORD:-}" ]; then
-        crane auth login "${PROD_REGISTRY}" -u "${PROD_REGISTRY_USER}" -p "${PROD_REGISTRY_PASSWORD}"
+      if [ -n "${PROD_PUSH_REGISTRY_USER:-}" ] && [ -n "${PROD_PUSH_REGISTRY_PASSWORD:-}" ]; then
+        crane auth login "${PROD_PUSH_REGISTRY}" -u "${PROD_PUSH_REGISTRY_USER}" -p "${PROD_PUSH_REGISTRY_PASSWORD}"
       fi
     # Copy — same digest, same layers, no rebuild
     - |

@@ -4,10 +4,11 @@
 # Uses scripts/build.sh as the core build logic — same as GitLab.
 #
 # Required Bamboo plan variables (Settings → Plan Variables):
-#   REGISTRY           — Target registry hostname
-#   REGISTRY_PROJECT   — Target project/repo prefix
-#   REGISTRY_USER      — Registry push username
-#   REGISTRY_PASSWORD  — Registry push password
+#   PULL_REGISTRY          — Registry proxy hostname base images are pulled from
+#   PUSH_REGISTRY          — Registry hostname built images are pushed to
+#   PUSH_PROJECT           — Target project/repo prefix
+#   PUSH_REGISTRY_USER     — Push-target username
+#   PUSH_REGISTRY_PASSWORD — Push-target password
 #   VENDOR             — Vendor label value
 #   CA_CERT            — (optional) PEM content of CA cert to inject
 #
@@ -178,9 +179,9 @@ promote-prod-prometheus:
           # Install crane
           curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
           SRC="${TRIVY_IMAGE}"
-          DST="${bamboo_PROD_REGISTRY}/${bamboo_PROD_REGISTRY_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-prometheus}:${BUILDKIT_TAG}"
-          ./crane auth login "${bamboo_REGISTRY}" -u "${bamboo_REGISTRY_USER}" -p "${bamboo_REGISTRY_PASSWORD}"
-          ./crane auth login "${bamboo_PROD_REGISTRY}" -u "${bamboo_PROD_REGISTRY_USER}" -p "${bamboo_PROD_REGISTRY_PASSWORD}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-prometheus}:${BUILDKIT_TAG}"
+          ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
+          ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
           ./crane copy "${SRC}" "${DST}"
           echo "Promoted: ${DST}"
   requirements:
@@ -297,9 +298,9 @@ promote-prod-nginx:
           . ./build.env
           curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
           SRC="${TRIVY_IMAGE}"
-          DST="${bamboo_PROD_REGISTRY}/${bamboo_PROD_REGISTRY_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-nginx}:${BUILDKIT_TAG}"
-          ./crane auth login "${bamboo_REGISTRY}" -u "${bamboo_REGISTRY_USER}" -p "${bamboo_REGISTRY_PASSWORD}"
-          ./crane auth login "${bamboo_PROD_REGISTRY}" -u "${bamboo_PROD_REGISTRY_USER}" -p "${bamboo_PROD_REGISTRY_PASSWORD}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/${bamboo_IMAGE_NAME:-nginx}:${BUILDKIT_TAG}"
+          ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
+          ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
           ./crane copy "${SRC}" "${DST}"
           echo "Promoted: ${DST}"
   requirements:

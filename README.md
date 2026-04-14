@@ -36,7 +36,8 @@ and run `./scripts/add-image.sh --regenerate`.
 ### Build locally
 
 ```bash
-export REGISTRY="registry.example.com"    # Your registry
+export PULL_REGISTRY="harbor.example.com"   # Proxy/cache we pull FROM
+export PUSH_REGISTRY="harbor.example.com"   # Registry we push TO
 ./scripts/build.sh prometheus             # Build only
 ./scripts/build.sh prometheus --push      # Build and push
 ./scripts/build.sh --list                 # List available images
@@ -66,20 +67,21 @@ All settings come from environment variables or CI/CD pipeline variables.
 
 | Variable | Where to set | Purpose |
 |----------|-------------|---------|
-| `REGISTRY` | global.env / CI variable | Target registry hostname |
-| `REGISTRY_PROJECT` | global.env / CI variable | Target project/repo prefix |
+| `PULL_REGISTRY` | global.env / CI variable | Registry proxy/cache base images are pulled FROM |
+| `PUSH_REGISTRY` | global.env / CI variable | Registry built images are pushed TO (defaults to `${PULL_REGISTRY}`) |
+| `PUSH_PROJECT` | global.env / CI variable | Target project/repo prefix |
 | `VENDOR` | global.env / CI variable | Vendor label value |
-| `REGISTRY_USER` | CI variable | Registry push username |
-| `REGISTRY_PASSWORD` | CI variable (masked) | Registry push password |
+| `PUSH_REGISTRY_USER` | CI variable | Registry push username |
+| `PUSH_REGISTRY_PASSWORD` | CI variable (masked) | Registry push password |
 | `CA_CERT` | CI variable | PEM content of CA cert to inject |
 | `FORCE_ALL` | CI variable | `true` to rebuild all images |
 | `ENABLE_PROD_PROMOTE` | CI variable | `true` to show manual promote-to-prod jobs |
 | `BUILDER_IMAGE` | global.env / CI variable | Alpine image for cert builder stage (via registry proxy) |
 | `APK_MIRROR` | global.env / CI variable | Alpine apk mirror base URL (replaces dl-cdn.alpinelinux.org/alpine) |
-| `PROD_REGISTRY` | CI variable | Production registry hostname |
-| `PROD_REGISTRY_PROJECT` | CI variable | Prod project/path (defaults to `REGISTRY_PROJECT`) |
-| `PROD_REGISTRY_USER` | CI variable | Prod registry username |
-| `PROD_REGISTRY_PASSWORD` | CI variable (masked) | Prod registry password |
+| `PROD_PUSH_REGISTRY` | CI variable | Production registry hostname |
+| `PROD_PUSH_PROJECT` | CI variable | Prod project/path (defaults to `PUSH_PROJECT`) |
+| `PROD_PUSH_REGISTRY_USER` | CI variable | Prod registry username |
+| `PROD_PUSH_REGISTRY_PASSWORD` | CI variable (masked) | Prod registry password |
 
 ## Repository Structure
 
@@ -87,7 +89,7 @@ All settings come from environment variables or CI/CD pipeline variables.
 container-images/
 ├── Dockerfile              # Shared template (labels + remediation + certs)
 ├── certs/                  # CA certs injected at build time (gitignored)
-├── global.env              # Default config (REGISTRY, REGISTRY_PROJECT, VENDOR)
+├── global.env              # Default config (PULL_REGISTRY, PUSH_REGISTRY, PUSH_PROJECT, VENDOR)
 ├── .ci/
 │   └── promote.yml         # Reusable CI template (sources image.env at runtime)
 ├── scripts/
@@ -185,10 +187,10 @@ If your environment has no direct internet access, all external dependencies
 can be routed through a registry proxy (Nexus, Artifactory, Harbor, etc.).
 Three variables control this — all set in `global.env` or as CI variables:
 
-**`REGISTRY`** — Docker image proxy (already required for `SOURCE` in image.env).
+**`PULL_REGISTRY`** — Docker image proxy (already required for `SOURCE` in image.env).
 
 **`BUILDER_IMAGE`** — The Alpine image used internally for cert building.
-Defaults to `${REGISTRY}/docker-hub/library/alpine:3.21` so it pulls through
+Defaults to `${PULL_REGISTRY}/docker-hub/library/alpine:3.21` so it pulls through
 your Docker Hub proxy instead of hitting Docker Hub directly.
 
 **`APK_MIRROR`** — Alpine package mirror base URL. Replaces
@@ -198,7 +200,7 @@ are preserved automatically.
 
 ```bash
 # global.env — example for Nexus
-BUILDER_IMAGE="${BUILDER_IMAGE:-${REGISTRY}/docker-hub/library/alpine:3.21}"
+BUILDER_IMAGE="${BUILDER_IMAGE:-${PULL_REGISTRY}/docker-hub/library/alpine:3.21}"
 APK_MIRROR="${APK_MIRROR:-https://nexus.example.com/repository/alpine-proxy}"
 ```
 
@@ -257,11 +259,11 @@ The custom Dockerfile has access to the full repo as build context
 # ── Required: used to pull and build the image ────────────────────────
 IMAGE_NAME="prometheus"                             # Repo name in target registry
 TAG="v3.11.0"                                       # Upstream tag to pull
-SOURCE="${REGISTRY}/docker-hub/prom/prometheus"      # Pull path (via proxy/cache)
+SOURCE="${PULL_REGISTRY}/docker-hub/prom/prometheus"      # Pull path (via proxy/cache)
 
 # ── Optional: registry destination ───────────────────────────────────
-# Override global REGISTRY_PROJECT for per-tenant or per-team paths.
-# REGISTRY_PROJECT="cDSS"    # → registry.example.com/cDSS/prometheus
+# Override global PUSH_PROJECT for per-tenant or per-team paths.
+# PUSH_PROJECT="cDSS"    # → registry.example.com/cDSS/prometheus
 
 # ── Optional: custom labels ──────────────────────────────────────────
 # Create images/<name>/labels.env with one key=value per line.

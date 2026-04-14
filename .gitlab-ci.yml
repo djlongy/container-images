@@ -37,7 +37,7 @@ variables:
   FORCE_ALL: "false"
   # Alpine via registry proxy — no direct Docker Hub access assumed.
   # Override in CI/CD settings to match your proxy path convention.
-  BUILDER_IMAGE: "${REGISTRY}/docker-hub/library/alpine:3.21"
+  BUILDER_IMAGE: "${PULL_REGISTRY}/docker-hub/library/alpine:3.21"
   # Alpine APK mirror — replaces dl-cdn.alpinelinux.org/alpine in /etc/apk/repositories.
   # Set to your Artifactory/proxy Alpine remote repo base URL.
   APK_MIRROR: ""

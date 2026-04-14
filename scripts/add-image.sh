@@ -80,10 +80,10 @@ cat > "${IMAGE_DIR}/image.env" << ENVEOF
 # ── Required: pull and build ──────────────────────────────────────────
 IMAGE_NAME="${NAME}"
 TAG="TODO"
-SOURCE="\${REGISTRY}/docker-hub/library/${NAME}"
+SOURCE="\${PULL_REGISTRY}/docker-hub/library/${NAME}"
 
 # ── Optional: registry destination ───────────────────────────────────
-# REGISTRY_PROJECT="cDSS"
+# PUSH_PROJECT="cDSS"
 
 # ── Optional: custom labels ──────────────────────────────────────────
 # Create images/${NAME}/labels.env with one key=value per line.
