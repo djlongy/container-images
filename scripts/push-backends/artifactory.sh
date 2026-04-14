@@ -4,14 +4,17 @@
 # Sourced by scripts/build.sh when REGISTRY_KIND=artifactory and --push
 # is requested. Exposes a single entry point, push_to_backend(), that:
 #
-#   1. Retags the locally-built image under the Artifactory-specific path
-#        ${ARTIFACTORY_URL}/${ARTIFACTORY_TEAM}/${IMAGE_NAME}:${TAG}
-#      (Artifactory's nginx sidecar routes the <team> prefix to the
-#      <team>-docker-<suffix> repo — dev → *-docker-local, prod →
-#      *-docker-prod. Match the reference JCR Free layout from the
-#      homelab deployment.)
+#   1. Resolves two layout templates at runtime:
+#        ARTIFACTORY_IMAGE_REF    — the docker push URL
+#        ARTIFACTORY_MANIFEST_PATH — the REST API storage path for
+#                                    property tagging
+#      Both are shell parameter-expansion templates. See the
+#      "Artifactory layout templates" section in global.env.example
+#      for four named presets (homelab per-team, shared repo, subdomain,
+#      subdomain-per-team) or write your own.
 #
-#   2. Logs docker in to the Artifactory host and pushes.
+#   2. Retags the locally-built image to the resolved ARTIFACTORY_IMAGE_REF
+#      and logs docker in to ARTIFACTORY_PUSH_HOST before pushing.
 #
 #   3. Publishes build info to Artifactory using the LCD pattern that
 #      works on both JCR Free and Pro:
@@ -35,18 +38,46 @@
 #
 # Required env (fail fast if missing):
 #   ARTIFACTORY_URL        e.g. https://artifactory.example.com
+#                          Used for the REST API (jf config, set-props).
+#                          NOT necessarily the docker push host — see
+#                          ARTIFACTORY_PUSH_HOST below.
 #   ARTIFACTORY_USER       username with push rights to the target repo
 #   ARTIFACTORY_PASSWORD   (or ARTIFACTORY_TOKEN — access token preferred)
-#   ARTIFACTORY_TEAM       routing prefix (your team acronym — e.g. a
-#                          4-letter code the platform team assigns you)
+#   ARTIFACTORY_TEAM       your team acronym (commonly a 4-letter code the
+#                          platform team assigns) — runtime-only, never
+#                          committed
 #
 # Optional env:
-#   ARTIFACTORY_ENVIRONMENT  dev|prod (default: dev → *-docker-local)
+#   ARTIFACTORY_PUSH_HOST    docker push hostname. Defaults to the host
+#                            portion of ARTIFACTORY_URL. Override for
+#                            subdomain layouts, e.g.
+#                              ARTIFACTORY_PUSH_HOST=docker.artifactory.example.com
+#   ARTIFACTORY_IMAGE_REF    docker push URL template (see presets in
+#                            global.env.example). Defaults to
+#                              ${ARTIFACTORY_PUSH_HOST}/${ARTIFACTORY_TEAM}/${IMAGE_NAME}:${IMAGE_TAG}
+#   ARTIFACTORY_MANIFEST_PATH storage path template for set-props.
+#                            Defaults to
+#                              ${ARTIFACTORY_TEAM}-docker-${ARTIFACTORY_REPO_SUFFIX}/${IMAGE_NAME}/${IMAGE_TAG}/manifest.json
+#   ARTIFACTORY_ENVIRONMENT  dev|prod (default: dev). Exposed to templates
+#                            as ${ARTIFACTORY_ENVIRONMENT}; derived
+#                            ${ARTIFACTORY_REPO_SUFFIX} maps dev→local,
+#                            prod→prod for the legacy default templates.
+#                            Layouts that don't split dev/prod can just
+#                            not reference either variable.
 #   ARTIFACTORY_BUILD_NAME   defaults to ${IMAGE_NAME}
 #   ARTIFACTORY_BUILD_NUMBER defaults to $CI_JOB_ID / $CI_PIPELINE_ID /
 #                            $BUILD_NUMBER / $GITHUB_RUN_ID / $(date +%s)
 #   ARTIFACTORY_PROPERTIES   extra props, ;-separated, e.g.
 #                              "security.scan=pending;hardened=false"
+#
+# Template variables (available inside ARTIFACTORY_IMAGE_REF /
+# ARTIFACTORY_MANIFEST_PATH via shell parameter expansion):
+#   ${ARTIFACTORY_PUSH_HOST}    docker push host
+#   ${ARTIFACTORY_TEAM}         runtime team acronym
+#   ${ARTIFACTORY_ENVIRONMENT}  dev|prod (use :- for a default if needed)
+#   ${ARTIFACTORY_REPO_SUFFIX}  dev→local, prod→prod (legacy convenience)
+#   ${IMAGE_NAME}               image short name (e.g. nginx)
+#   ${IMAGE_TAG}                computed tag (upstream + git sha)
 
 set -uo pipefail
 
@@ -59,35 +90,89 @@ push_to_backend() {
   _artifactory_require_env   || return 1
   _artifactory_require_tools || return 1
 
-  local env="${ARTIFACTORY_ENVIRONMENT:-dev}"
-  local repo_suffix
-  case "${env}" in
-    prod|production) repo_suffix="prod"  ;;
-    *)               repo_suffix="local" ;;
+  # ── Decompose the build.sh local tag ──
+  # build.sh hands us the locally-built image reference, which looks like
+  #   ${PUSH_REGISTRY}/${PUSH_PROJECT}/<image>:<tag>
+  # Split it into the bare <image> and <tag> so templates can reference
+  # them as ${IMAGE_NAME} and ${IMAGE_TAG}.
+  local image_repo_tag="${built##*/}"
+  local _img_name="${image_repo_tag%:*}"
+  local _img_tag="${image_repo_tag##*:}"
+
+  # ── Build the template interpolation context ──
+  # Every variable referenced in ARTIFACTORY_IMAGE_REF /
+  # ARTIFACTORY_MANIFEST_PATH (and ARTIFACTORY_BUILD_NAME) is exported
+  # here so the template resolver below can see it. Template authors
+  # can rely on any of these being set; unset-safety is the user's
+  # responsibility via ${VAR:-fallback} syntax in their template.
+  export IMAGE_NAME="${_img_name}"
+  export IMAGE_TAG="${_img_tag}"
+  export ARTIFACTORY_TEAM
+
+  # Environment is optional. Default "dev" only if the user hasn't
+  # set it — some layouts (e.g. work's `docker` shared repo with no
+  # prod split) don't reference it at all. We also derive a REPO
+  # SUFFIX that maps dev→local / prod→prod for legacy-style
+  # per-team repos (used by the fallback default template below);
+  # users whose layouts don't need it just don't reference it.
+  : "${ARTIFACTORY_ENVIRONMENT:=dev}"
+  case "${ARTIFACTORY_ENVIRONMENT}" in
+    prod|production) export ARTIFACTORY_REPO_SUFFIX="prod"  ;;
+    *)               export ARTIFACTORY_REPO_SUFFIX="local" ;;
   esac
+  export ARTIFACTORY_ENVIRONMENT
 
-  # Strip the build.sh-constructed prefix to get the bare image:tag pair.
-  # Format: ${PUSH_REGISTRY}/${PUSH_PROJECT}/<image>:<tag>
-  local image_repo_tag="${built##*/}"                 # <image>:<tag>
-  local image_repo="${image_repo_tag%:*}"
-  local image_tag="${image_repo_tag##*:}"
+  # Docker push host. If the user set ARTIFACTORY_PUSH_HOST (typically
+  # to use a subdomain like docker.artifactory.example.com), we use
+  # that for the docker login and URL. Otherwise we fall back to the
+  # host portion of ARTIFACTORY_URL so the simple case needs no
+  # extra config.
+  if [ -z "${ARTIFACTORY_PUSH_HOST:-}" ]; then
+    local _url_host="${ARTIFACTORY_URL#https://}"
+    _url_host="${_url_host#http://}"
+    _url_host="${_url_host%%/*}"
+    ARTIFACTORY_PUSH_HOST="${_url_host}"
+  fi
+  export ARTIFACTORY_PUSH_HOST
 
-  # Target path uses the <team>/<image> virtual route that the
-  # Artifactory nginx sidecar re-writes to the <team>-docker-<suffix>
-  # backing repo. See the JCR reference doc from the homelab deployment.
-  local host="${ARTIFACTORY_URL#https://}"
-  host="${host#http://}"
-  local target="${host}/${ARTIFACTORY_TEAM}/${image_repo}:${image_tag}"
+  # ── Resolve the two layout templates ──
+  # See global.env.example "Artifactory layout templates" section for
+  # named presets (homelab, shared repo, subdomain, subdomain-per-team).
+  #
+  # Fallback defaults match the legacy per-team-repo behaviour this
+  # backend originally hardcoded, so anyone upgrading from the
+  # previous version sees zero change without editing config.
+  local image_ref_tpl manifest_path_tpl
+  if [ -n "${ARTIFACTORY_IMAGE_REF:-}" ]; then
+    image_ref_tpl="${ARTIFACTORY_IMAGE_REF}"
+  else
+    image_ref_tpl='${ARTIFACTORY_PUSH_HOST}/${ARTIFACTORY_TEAM}/${IMAGE_NAME}:${IMAGE_TAG}'
+  fi
+  if [ -n "${ARTIFACTORY_MANIFEST_PATH:-}" ]; then
+    manifest_path_tpl="${ARTIFACTORY_MANIFEST_PATH}"
+  else
+    manifest_path_tpl='${ARTIFACTORY_TEAM}-docker-${ARTIFACTORY_REPO_SUFFIX}/${IMAGE_NAME}/${IMAGE_TAG}/manifest.json'
+  fi
+
+  # Shell parameter expansion via eval. Templates come from the
+  # gitignored global.env or shell environment — same trust boundary
+  # as the rest of build.sh. Shell injection via a template would
+  # require the user to attack themselves.
+  local target manifest_path
+  eval "target=\"${image_ref_tpl}\""
+  eval "manifest_path=\"${manifest_path_tpl}\""
 
   echo ""
   echo "=== Artifactory push ==="
   echo "  Source (local):  ${built}"
   echo "  Target:          ${target}"
   echo "  Team:            ${ARTIFACTORY_TEAM}"
-  echo "  Environment:     ${env} (${ARTIFACTORY_TEAM}-docker-${repo_suffix})"
+  echo "  Environment:     ${ARTIFACTORY_ENVIRONMENT}"
+  echo "  Push host:       ${ARTIFACTORY_PUSH_HOST}"
+  echo "  Manifest path:   ${manifest_path}"
 
   _artifactory_jf_config || return 1
-  _artifactory_docker_login "${host}" || return 1
+  _artifactory_docker_login "${ARTIFACTORY_PUSH_HOST}" || return 1
 
   docker tag "${built}" "${target}"
   local push_output
@@ -100,26 +185,21 @@ push_to_backend() {
 
   # Capture the registry-reported manifest digest for build.env so
   # downstream CI jobs (cosign, trivy, syft) can sign/scan by digest.
-  # extract_push_digest is defined in scripts/build.sh and is in scope
-  # because build.sh sources this file.
+  # extract_push_digest + emit_build_env are defined in scripts/build.sh
+  # and are in scope because build.sh sources this file.
   local push_digest
   push_digest=$(extract_push_digest "${push_output}")
   emit_build_env "${target}" "${push_digest}"
 
   local build_name build_number
-  build_name="${ARTIFACTORY_BUILD_NAME:-${image_repo}}"
+  build_name="${ARTIFACTORY_BUILD_NAME:-${IMAGE_NAME}}"
   build_number="${ARTIFACTORY_BUILD_NUMBER:-${CI_JOB_ID:-${CI_PIPELINE_ID:-${BUILD_NUMBER:-${GITHUB_RUN_ID:-$(date +%s)}}}}}"
   echo "  Build name:      ${build_name}"
   echo "  Build number:    ${build_number}"
 
   _artifactory_build_publish "${build_name}" "${build_number}"
-  # Storage layout: <repo>/<image>/<tag>/manifest.json. The <team>
-  # prefix in the push URL is a virtual routing hint handled by
-  # Artifactory's nginx sidecar; it does NOT appear in the actual
-  # backing-store path (verified against the homelab JCR instance).
-  _artifactory_set_props \
-    "${ARTIFACTORY_TEAM}-docker-${repo_suffix}/${image_repo}/${image_tag}/manifest.json" \
-    "${build_name}" "${build_number}" "${env}"
+  _artifactory_set_props "${manifest_path}" \
+    "${build_name}" "${build_number}" "${ARTIFACTORY_ENVIRONMENT}"
 
   echo "Pushed: ${target}"
 }
