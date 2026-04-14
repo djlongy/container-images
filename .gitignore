@@ -18,3 +18,4 @@ certs/*.csr
 
 # Agent / editor runtime state
 .claude/
+build.env

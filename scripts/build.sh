@@ -34,6 +34,49 @@ resolve_global_env() {
   fi
 }
 
+# Emit a build.env dotenv file at REPO_ROOT/build.env capturing the
+# digest-pinned reference for downstream CI jobs (cosign, trivy, syft,
+# crane). CI jobs that source this file get:
+#
+#   IMAGE_NAME    — registry + repo path, no tag  (harbor.example.com/base-images/nginx)
+#   BUILDKIT_TAG  — just the tag                  (1.27.5-alpine-a1b2c3d)
+#   IMAGE_DIGEST  — name@sha256:... if a digest was captured, else name:tag
+#   TRIVY_IMAGE   — same as IMAGE_DIGEST (trivy accepts both forms)
+#   SYFT_IMAGE    — same as IMAGE_DIGEST
+#
+# Cosign wants digest references specifically because it signs by
+# content hash, not tag. Tag-references make attestation discovery
+# fragile because a tag can be overwritten. The digest we capture
+# here is the one the registry reported at push time, so it matches
+# exactly what got written server-side.
+emit_build_env() {
+  local full_image="$1"   # registry/project/name:tag
+  local digest="$2"       # sha256:... (may be empty)
+  local tag="${full_image##*:}"
+  local name="${full_image%:*}"
+  local image_digest="${full_image}"
+  [ -n "${digest}" ] && image_digest="${name}@${digest}"
+  cat > "${REPO_ROOT}/build.env" <<BUILDENV
+IMAGE_NAME=${name}
+BUILDKIT_TAG=${tag}
+IMAGE_DIGEST=${image_digest}
+TRIVY_IMAGE=${image_digest}
+SYFT_IMAGE=${image_digest}
+BUILDENV
+  echo "  build.env:    ${REPO_ROOT}/build.env"
+}
+
+# Extract the sha256 manifest digest from a `docker push` captured
+# stdout/stderr. The registry echoes a line like
+#   <tag>: digest: sha256:<64-hex> size: <n>
+# on every successful push, whether layers were newly uploaded or
+# "Layer already exists". Returns empty if no digest was found
+# (e.g. the push actually failed — caller should have already
+# checked exit code before getting here).
+extract_push_digest() {
+  printf '%s' "$1" | grep -oE 'sha256:[0-9a-f]{64}' | head -1
+}
+
 # Resolve which per-image env file to source. Same pattern as global:
 # images/<name>/image.env is gitignored (local overrides), *.example is
 # the versioned template. Fresh clones and CI pick up the example with
@@ -390,7 +433,18 @@ if [ "${PUSH}" = "true" ]; then
   else
     echo ""
     echo "=== Pushing to ${PUSH_REGISTRY} ==="
-    docker push "${FULL_IMAGE}"
-    echo "Pushed: ${FULL_IMAGE}"
+    PUSH_OUTPUT=$(docker push "${FULL_IMAGE}" 2>&1) || {
+      echo "${PUSH_OUTPUT}" >&2
+      echo "ERROR: docker push failed" >&2
+      exit 1
+    }
+    echo "${PUSH_OUTPUT}"
+    PUSH_DIGEST=$(extract_push_digest "${PUSH_OUTPUT}")
+    emit_build_env "${FULL_IMAGE}" "${PUSH_DIGEST}"
+    if [ -n "${PUSH_DIGEST}" ]; then
+      echo "Pushed: ${FULL_IMAGE%:*}@${PUSH_DIGEST}"
+    else
+      echo "Pushed: ${FULL_IMAGE} (no digest captured)"
+    fi
   fi
 fi

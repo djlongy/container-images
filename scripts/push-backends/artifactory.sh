@@ -88,11 +88,22 @@ push_to_backend() {
   _artifactory_jf_config || return 1
   _artifactory_docker_login "${host}" || return 1
 
-  docker tag  "${built}" "${target}"
-  docker push "${target}" || {
+  docker tag "${built}" "${target}"
+  local push_output
+  push_output=$(docker push "${target}" 2>&1) || {
+    echo "${push_output}" >&2
     echo "ERROR: docker push to Artifactory failed" >&2
     return 1
   }
+  echo "${push_output}"
+
+  # Capture the registry-reported manifest digest for build.env so
+  # downstream CI jobs (cosign, trivy, syft) can sign/scan by digest.
+  # extract_push_digest is defined in scripts/build.sh and is in scope
+  # because build.sh sources this file.
+  local push_digest
+  push_digest=$(extract_push_digest "${push_output}")
+  emit_build_env "${target}" "${push_digest}"
 
   local build_name build_number
   build_name="${ARTIFACTORY_BUILD_NAME:-${image_repo}}"
