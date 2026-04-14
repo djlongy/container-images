@@ -34,6 +34,24 @@ resolve_global_env() {
   fi
 }
 
+# Resolve which per-image env file to source. Same pattern as global:
+# images/<name>/image.env is gitignored (local overrides), *.example is
+# the versioned template. Fresh clones and CI pick up the example with
+# no bootstrap step; local users run
+#   cp images/<name>/image.env.example images/<name>/image.env
+# to pin a different TAG, flip a flag, etc. without touching the repo.
+# $1 = absolute directory path for the image (images/<name>/)
+resolve_image_env() {
+  local dir="$1"
+  if [ -f "${dir}/image.env" ]; then
+    printf '%s' "${dir}/image.env"
+  elif [ -f "${dir}/image.env.example" ]; then
+    printf '%s' "${dir}/image.env.example"
+  else
+    return 1
+  fi
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 usage() {
@@ -60,10 +78,10 @@ list_images() {
   echo "Available images:"
   for dir in "${REPO_ROOT}"/images/*/; do
     name="$(basename "${dir}")"
-    [ -f "${dir}/image.env" ] || continue
+    env_file="$(resolve_image_env "${dir%/}")" || continue
     (
       # shellcheck source=/dev/null
-      source "${dir}/image.env"
+      source "${env_file}"
       flags=""
       [ "${REMEDIATE:-false}"    = "true" ] && flags="${flags} [+remediate:${DISTRO:-?}]"
       [ "${INJECT_CERTS:-false}" = "true" ] && flags="${flags} [+certs]"
@@ -102,10 +120,12 @@ if [ ! -d "${IMAGE_DIR}" ]; then
   exit 1
 fi
 
-if [ ! -f "${IMAGE_DIR}/image.env" ]; then
-  echo "ERROR: Missing image.env in images/${IMAGE}/" >&2
+IMAGE_ENV_FILE="$(resolve_image_env "${IMAGE_DIR}")" || {
+  echo "ERROR: Missing image.env and image.env.example in images/${IMAGE}/" >&2
+  echo "  Expected: ${IMAGE_DIR}/image.env (gitignored local override)" >&2
+  echo "         or ${IMAGE_DIR}/image.env.example (versioned template)" >&2
   exit 1
-fi
+}
 
 # Config precedence (highest wins):
 #   1. Shell environment (export VAR=… before invoking build.sh, or CI vars)
@@ -136,7 +156,7 @@ unset __v
 # shellcheck source=/dev/null
 source "$(resolve_global_env)"
 # shellcheck source=/dev/null
-source "${IMAGE_DIR}/image.env"
+source "${IMAGE_ENV_FILE}"
 
 # Re-apply shell overrides so they win over file values
 if [ -n "${__SHELL_OVERRIDES}" ]; then

@@ -13,9 +13,13 @@ variables or CI/CD pipeline variables — nothing is hardcoded.
 
 ### Bump an existing image tag
 
-1. Edit `images/<name>/image.env` — update `TAG`
+1. Edit `images/<name>/image.env.example` — update `TAG`
 2. Push to `main`
 3. Pipeline builds, scans, signs only the changed image
+
+(If you have a local `images/<name>/image.env` for experimentation,
+that file wins over the example but stays out of git. Bump the
+example for shared/CI changes.)
 
 ### Add a new image
 
@@ -23,10 +27,10 @@ variables or CI/CD pipeline variables — nothing is hardcoded.
 ./scripts/add-image.sh redis
 ```
 
-This scaffolds `images/redis/` with `image.env` and `ci.yml`, and adds the
-include to `.gitlab-ci.yml`. Then:
+This scaffolds `images/redis/` with `image.env.example` and `ci.yml`, and
+adds the include to `.gitlab-ci.yml`. Then:
 
-1. Edit `images/redis/image.env` — set `TAG` and `SOURCE`
+1. Edit `images/redis/image.env.example` — set `TAG`, `DISTRO`, `SOURCE`
 2. Push to `main`
 
 The `ci.yml` is auto-generated from `.ci/image-ci.yml.template` — never edit
@@ -35,18 +39,30 @@ and run `./scripts/add-image.sh --regenerate`.
 
 ### First clone — create your local config
 
-`global.env` is gitignored so your real registry hostnames, proxy URLs,
-and vendor strings never get committed. On a fresh clone:
+Two layers of config are shipped as `*.example` templates and gitignored
+for local overrides. CI and fresh clones don't need any bootstrap — the
+scripts all fall through to the `.example` files if the real file doesn't
+exist, so everything works out of the box. Local customization is
+opt-in: you copy only the files you want to tweak.
 
+**Global** (registry hostnames, proxy URLs, vendor string):
 ```bash
 cp global.env.example global.env
-$EDITOR global.env     # set PULL_REGISTRY, PUSH_REGISTRY, etc.
+$EDITOR global.env
 ```
 
-`build.sh`, `check-updates.sh`, and the CI templates fall back to
-`global.env.example` when `global.env` doesn't exist, so CI runners
-that populate variables via pipeline env vars instead of a file still
-work without modification.
+**Per-image** (pinned TAG, flag overrides — one team may want
+`INJECT_CERTS=true` while another wants `false`; one team may want to
+test a newer upstream TAG while the shared template stays stable):
+```bash
+cp images/nginx/image.env.example images/nginx/image.env
+$EDITOR images/nginx/image.env
+```
+
+`build.sh`, `check-updates.sh`, and the CI templates all resolve via
+`<file>` → `<file>.example` fallback, so CI runners that populate
+variables via pipeline env vars instead of files still work without
+modification.
 
 ### Build locally
 
@@ -114,10 +130,11 @@ container-images/
 │   └── build.sh            # Agnostic local build script
 ├── images/
 │   └── <name>/
-│       ├── image.env       # TAG, SOURCE, enrichment flags (EDIT THIS)
-│       ├── ci.yml          # GitLab CI jobs — boilerplate, no version strings
-│       ├── remediate.sh    # (optional) CVE remediation script
-│       └── Dockerfile      # (optional) Custom override — only if shared won't do
+│       ├── image.env.example  # Versioned template — cp to image.env
+│       ├── image.env          # Local overrides (gitignored)
+│       ├── ci.yml             # GitLab CI jobs — boilerplate, no version strings
+│       ├── remediate.sh       # (optional) CVE remediation script
+│       └── Dockerfile         # (optional) Custom override — only if shared won't do
 ├── .gitlab-ci.yml          # Root pipeline (includes per-image ci.yml)
 └── README.md
 ```

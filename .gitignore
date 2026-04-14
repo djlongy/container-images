@@ -1,5 +1,11 @@
-# Local environment overrides (copy from global.env.example on first clone)
+# Local environment overrides (copy from *.example on first clone).
+# Global config: PULL/PUSH registries, mirror URLs, team/vendor strings.
 global.env
+
+# Per-image local overrides. Templates live in images/<name>/image.env.example
+# (versioned); the real image.env is gitignored so teams can pin different
+# TAGs, flip INJECT_CERTS, etc. without committing local state.
+images/*/image.env
 
 # CA certificates — injected at build time from CI variables or Vault
 # Never commit certs to the repo (may be pushed to public GitHub)

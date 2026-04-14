@@ -100,14 +100,22 @@ UPDATES_FOUND=0
 
 for IMAGE_DIR in "${REPO_ROOT}"/images/*/; do
   IMAGE_NAME="$(basename "${IMAGE_DIR}")"
-  ENV_FILE="${IMAGE_DIR}/image.env"
+  # Prefer local gitignored files, fall back to versioned templates —
+  # same pattern as scripts/build.sh resolve_global_env / resolve_image_env.
+  IMAGE_DIR_TRIMMED="${IMAGE_DIR%/}"
+  if [ -f "${IMAGE_DIR_TRIMMED}/image.env" ]; then
+    ENV_FILE="${IMAGE_DIR_TRIMMED}/image.env"
+  elif [ -f "${IMAGE_DIR_TRIMMED}/image.env.example" ]; then
+    ENV_FILE="${IMAGE_DIR_TRIMMED}/image.env.example"
+  else
+    continue
+  fi
 
-  [ -f "${ENV_FILE}" ] || continue
-
-  # Source to get TAG and SOURCE — prefer local global.env, fall back to
-  # the versioned global.env.example template for fresh clones / CI.
-  GLOBAL_ENV_FILE="${REPO_ROOT}/global.env"
-  [ -f "${GLOBAL_ENV_FILE}" ] || GLOBAL_ENV_FILE="${REPO_ROOT}/global.env.example"
+  if [ -f "${REPO_ROOT}/global.env" ]; then
+    GLOBAL_ENV_FILE="${REPO_ROOT}/global.env"
+  else
+    GLOBAL_ENV_FILE="${REPO_ROOT}/global.env.example"
+  fi
   # shellcheck source=/dev/null
   source "${GLOBAL_ENV_FILE}"
   # shellcheck source=/dev/null

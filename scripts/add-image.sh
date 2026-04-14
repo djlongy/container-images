@@ -73,8 +73,8 @@ echo "Adding image: ${NAME}"
 # Create directory
 mkdir -p "${IMAGE_DIR}"
 
-# Scaffold image.env
-cat > "${IMAGE_DIR}/image.env" << ENVEOF
+# Scaffold image.env.example (versioned template — image.env is gitignored)
+cat > "${IMAGE_DIR}/image.env.example" << ENVEOF
 # ${NAME} — TODO: add upstream URL here
 
 # ── Required: pull and build ──────────────────────────────────────────
@@ -96,7 +96,9 @@ SOURCE="\${PULL_REGISTRY}/docker-hub/library/${NAME}"
 # ORIGINAL_USER="root"
 # INJECT_CERTS="false"
 ENVEOF
-echo "  Created:   images/${NAME}/image.env (edit TAG, DISTRO and SOURCE)"
+echo "  Created:   images/${NAME}/image.env.example (edit TAG, DISTRO and SOURCE)"
+echo "  Tip:       cp images/${NAME}/image.env.example images/${NAME}/image.env"
+echo "             to customize locally — image.env is gitignored."
 
 # Generate ci.yml from template
 generate_ci "${NAME}"

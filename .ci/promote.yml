@@ -29,7 +29,7 @@
   script:
     # Source config — image.env is the single source of truth
     - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
-    - source "images/${IMAGE_DIR}/image.env"
+    - 'if [ -f images/${IMAGE_DIR}/image.env ]; then source images/${IMAGE_DIR}/image.env; else source images/${IMAGE_DIR}/image.env.example; fi'
     - |
       FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}"
       PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
@@ -236,7 +236,7 @@
     entrypoint: [""]
   script:
     - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
-    - source "images/${IMAGE_DIR}/image.env"
+    - 'if [ -f images/${IMAGE_DIR}/image.env ]; then source images/${IMAGE_DIR}/image.env; else source images/${IMAGE_DIR}/image.env.example; fi'
     - |
       PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
       SRC="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
