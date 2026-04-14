@@ -21,6 +21,7 @@ include:
   # Per-image pipeline definitions
   - local: 'images/prometheus/ci.yml'
   - local: 'images/nginx/ci.yml'
+  - local: 'images/sonarqube/ci.yml'
 
 stages:
   - .pre

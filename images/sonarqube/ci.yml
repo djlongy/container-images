@@ -1,0 +1,67 @@
+# Auto-generated from .ci/image-ci.yml.template — do not edit by hand
+# To change pipeline structure for ALL images, edit the template then run:
+#   ./scripts/add-image.sh --regenerate
+
+build-sonarqube:
+  extends: .promote-build
+  variables:
+    IMAGE_DIR: sonarqube
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+    - if: '$FORCE_ALL == "true"'
+
+trivy-image-sonarqube:
+  extends: .promote-scan
+  needs: [{ job: build-sonarqube, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+    - if: '$FORCE_ALL == "true"'
+
+syft-sbom-sonarqube:
+  extends: .promote-sbom
+  needs: [{ job: build-sonarqube, artifacts: true }]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+    - if: '$FORCE_ALL == "true"'
+
+cosign-sign-sonarqube:
+  extends: .promote-sign
+  needs:
+    - { job: build-sonarqube, artifacts: true }
+    - { job: trivy-image-sonarqube, artifacts: true }
+    - { job: syft-sbom-sonarqube, artifacts: true, optional: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+    - if: '$FORCE_ALL == "true"'
+
+vigil-notify-sonarqube:
+  extends: .promote-notify
+  needs:
+    - { job: cosign-sign-sonarqube, optional: true }
+    - { job: build-sonarqube, optional: true, artifacts: true }
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+    - if: '$FORCE_ALL == "true"'
+
+promote-prod-sonarqube:
+  extends: .promote-prod
+  variables:
+    IMAGE_DIR: sonarqube
+  needs:
+    - { job: build-sonarqube, artifacts: true }
+    - { job: vigil-notify-sonarqube, optional: true }
+  rules:
+    - if: '$ENABLE_PROD_PROMOTE != "true"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: [images/sonarqube/**]
+      when: manual
+      allow_failure: true
+    - if: '$FORCE_ALL == "true"'
+      when: manual
+      allow_failure: true
