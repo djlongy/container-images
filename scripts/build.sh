@@ -52,9 +52,9 @@ EOF
 }
 
 list_images() {
-  # Source global env ONCE so ${PULL_REGISTRY} (referenced by SOURCE in
-  # each image.env) expands. Each per-image source runs in a subshell so
-  # variables from one image.env don't leak into the next iteration.
+  # Source global.env ONCE so ${PULL_REGISTRY} (referenced by SOURCE
+  # in each image.env) expands. Each per-image source runs in a subshell
+  # so variables from one image.env don't leak into the next iteration.
   # shellcheck source=/dev/null
   source "$(resolve_global_env)"
   echo "Available images:"
@@ -107,11 +107,46 @@ if [ ! -f "${IMAGE_DIR}/image.env" ]; then
   exit 1
 fi
 
-# Source global vars then image-specific vars (image overrides global)
+# Config precedence (highest wins):
+#   1. Shell environment (export VAR=… before invoking build.sh, or CI vars)
+#   2. images/<name>/image.env
+#   3. global.env
+#
+# Implementation: snapshot the keys we care about from the shell, source
+# global.env then image.env (so file defaults populate), then re-apply
+# the snapshot so exported shell values overwrite file values. This keeps
+# one source of truth — the shell is always the override when set.
+__SHELL_OVERRIDES=""
+for __v in \
+  PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+  BUILDER_IMAGE APK_MIRROR APT_MIRROR \
+  PROD_PUSH_REGISTRY PROD_PUSH_PROJECT \
+  IMAGE_NAME TAG DISTRO SOURCE \
+  REMEDIATE INJECT_CERTS ORIGINAL_USER CUSTOM_DOCKERFILE \
+  VAULT_KV_MOUNT VAULT_CA_PATH CA_CERT
+do
+  # Only snapshot if the variable is actually set in the shell (not unset).
+  # This distinguishes "user exported it" from "file will set it".
+  if [ "${!__v+set}" = "set" ]; then
+    __SHELL_OVERRIDES="${__SHELL_OVERRIDES}${__v}=$(printf '%q' "${!__v}")"$'\n'
+  fi
+done
+unset __v
+
 # shellcheck source=/dev/null
 source "$(resolve_global_env)"
 # shellcheck source=/dev/null
 source "${IMAGE_DIR}/image.env"
+
+# Re-apply shell overrides so they win over file values
+if [ -n "${__SHELL_OVERRIDES}" ]; then
+  while IFS= read -r __line; do
+    [ -z "${__line}" ] && continue
+    eval "export ${__line}"
+  done <<< "${__SHELL_OVERRIDES}"
+  unset __line
+fi
+unset __SHELL_OVERRIDES
 
 # ── Derived values ────────────────────────────────────────────────────
 
@@ -122,22 +157,26 @@ FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
 BASE_IMAGE="${SOURCE}:${TAG}"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Preflight: validate DISTRO + resolve remediate.sh
+# Preflight: validate DISTRO + materialise remediate.sh in build context
 #
-# Each image must declare its base DISTRO in image.env (alpine, debian,
-# ubuntu, ubi, busybox, scratch, …) so we know which package manager to
-# drive when REMEDIATE=true. Resolution order for the script:
+# The Dockerfile unconditionally COPYs images/<name>/remediate.sh into
+# the base-remediated stage. Docker/BuildKit evaluates COPY sources for
+# every defined stage at DAG resolution time even when the stage is
+# unreachable from the final target, so remediate.sh MUST exist on disk
+# regardless of REMEDIATE's value. At runtime the final-${REMEDIATE}-*
+# stage selector is what decides whether the script actually runs.
 #
-#   1. images/<name>/remediate.sh        — per-image override wins
-#   2. scripts/remediate/${DISTRO}.sh    — shared distro default
+# Resolution order when REMEDIATE=true:
+#   1. images/<name>/remediate.sh          (per-image override wins)
+#   2. scripts/remediate/${DISTRO}.sh      (shared distro default)
 #   3. Hard error if neither exists.
 #
-# The resolved script is copied into images/<name>/remediate.sh so the
-# Dockerfile's unconditional COPY finds it at a stable path. A trap at
-# the bottom of the script removes any script we materialised so it
-# doesn't leak into the repo.
+# When REMEDIATE=false we still place a no-op script so the COPY
+# succeeds; the stage that would run it is pruned from the final image.
 REMEDIATE_CLEANUP=""
-trap '[ -n "${REMEDIATE_CLEANUP}" ] && rm -f "${REMEDIATE_CLEANUP}"' EXIT
+# Note: the trap that cleans up this variable is installed a few lines
+# below (together with CERTS_CLEANUP). Both placeholders get removed on
+# exit via the same trap.
 
 if [ "${REMEDIATE:-false}" = "true" ]; then
   if [ -z "${DISTRO:-}" ]; then
@@ -160,9 +199,7 @@ if [ "${REMEDIATE:-false}" = "true" ]; then
   fi
 elif [ ! -f "${IMAGE_DIR}/remediate.sh" ]; then
   # REMEDIATE=false and no per-image script — drop a no-op so the
-  # Dockerfile's unconditional COPY images/<name>/remediate.sh succeeds.
-  # The base-remediated stage that would execute it is pruned from the
-  # final image by the multi-stage final selector.
+  # Dockerfile COPY succeeds. The base-remediated stage won't run.
   printf '#!/bin/sh\n# placeholder — REMEDIATE=false, this file is never executed\nexit 0\n' \
     > "${IMAGE_DIR}/remediate.sh"
   REMEDIATE_CLEANUP="${IMAGE_DIR}/remediate.sh"
@@ -179,7 +216,21 @@ fi
 #   1. CA_CERT env var (CI variable or export)
 #   2. HashiCorp Vault (if vault CLI available)
 #   3. Files already in certs/ (manually dropped, gitignored)
+#
+# The Dockerfile has an unconditional `COPY certs/*.crt /tmp/custom-ca/`
+# in the base-remediated stage, and BuildKit evaluates it even when
+# INJECT_CERTS=false and the stage is unreachable from the final target.
+# So certs/ must always contain at least one .crt at build time. When
+# injection is disabled we drop a no-op placeholder and clean it up on
+# exit via the existing trap, mirroring the remediate.sh pattern.
 mkdir -p "${REPO_ROOT}/certs"
+CERTS_CLEANUP=""
+# shellcheck disable=SC2064
+trap '
+  [ -n "${REMEDIATE_CLEANUP}" ] && rm -f "${REMEDIATE_CLEANUP}"
+  [ -n "${CERTS_CLEANUP}" ]     && rm -f "${CERTS_CLEANUP}"
+' EXIT
+
 if [ "${INJECT_CERTS:-false}" = "true" ]; then
   if [ -n "${CA_CERT:-}" ]; then
     echo "${CA_CERT}" > "${REPO_ROOT}/certs/custom-ca.crt"
@@ -197,6 +248,28 @@ if [ "${INJECT_CERTS:-false}" = "true" ]; then
     echo "  ERROR: INJECT_CERTS=true but no .crt files in certs/"
     echo "  Set CA_CERT env var, configure Vault, or drop certs into certs/"
     exit 1
+  fi
+else
+  # INJECT_CERTS=false — if certs/ is empty, generate a valid throwaway
+  # self-signed cert so the Dockerfile's unconditional COPY certs/*.crt
+  # doesn't fail. The base-certs-only / base-remediated-certs stages
+  # that would touch it are pruned from the final image anyway, but
+  # BuildKit still evaluates them, and update-ca-certificates in the
+  # cert-merge stage will reject an invalid blob.
+  if ! ls "${REPO_ROOT}"/certs/*.crt >/dev/null 2>&1; then
+    PLACEHOLDER="${REPO_ROOT}/certs/placeholder.crt"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+        -keyout /dev/null \
+        -subj "/CN=container-images build placeholder/O=noop" \
+        -out "${PLACEHOLDER}" 2>/dev/null
+      CERTS_CLEANUP="${PLACEHOLDER}"
+    else
+      echo "ERROR: INJECT_CERTS=false and certs/ is empty, but openssl is" >&2
+      echo "not available to generate a placeholder. Install openssl or drop" >&2
+      echo "any valid .crt into certs/ to unblock the build." >&2
+      exit 1
+    fi
   fi
 fi
 
