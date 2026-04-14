@@ -389,6 +389,116 @@ to Layout A so existing configs keep working.
 | **D** Subdomain-per-team | `<team>.host/<image>:<tag>` | `<team>-docker-<suffix>/<image>/<tag>/manifest.json` |
 | **E** Team-dispatch subdomain | `docker.host/<team>/<image>:<tag>` | `<team>-docker-<suffix>/<image>/<tag>/manifest.json` *(team segment stripped by sidecar before storage — requires an external nginx `map` that rewrites host+path→repo)* |
 
+##### Nginx reverse proxy for Docker V2 routing
+
+**Artifactory Pro/Enterprise** handles Docker V2 subdomain routing
+natively — configure it in Admin → HTTP Settings → Docker Access Method →
+Sub Domain, set the server name, and your existing load balancer just
+does a dumb `proxy_pass` to Artifactory. No rewrites needed.
+
+**JCR Free** does NOT serve `/v2/` at the root. Docker clients always
+hit `/v2/` first and get a 404. You need an nginx reverse proxy (or
+sidecar) that rewrites Docker V2 paths to Artifactory's internal API
+format: `/v2/*` → `/artifactory/api/docker/<repo>/v2/*`.
+
+The config below works with any standard nginx (not NPM-specific). It
+supports all five layouts via a `map` block that resolves the hostname
+to the correct Artifactory repo name. Paste it into your nginx
+`server {}` block or use it as a standalone sidecar container.
+
+```nginx
+upstream artifactory {
+    server artifactory-host:8082;
+}
+
+# ── Subdomain → repo mapping ────────────────────────────────────────
+# One entry per subdomain. Add/remove as needed for your layout.
+map $host $docker_repo {
+    # Layout C/E: shared push registry (folder RBAC inside docker-local)
+    docker.artifactory.example.com        docker-local;
+
+    # Pull-through Docker Hub cache
+    dockerhub.artifactory.example.com     docker-hub-proxy;
+
+    # Environment-split virtual repos (aggregates locals + remote)
+    docker-dev.artifactory.example.com    docker-dev-virtual;
+    docker-prod.artifactory.example.com   docker-prod-virtual;
+
+    # Layout D: per-team subdomain → per-team repo
+    teamA.artifactory.example.com         teamA-docker-local;
+    teamB.artifactory.example.com         teamB-docker-local;
+
+    # Fallback for unknown hosts
+    default                                docker-local;
+}
+
+server {
+    listen 443 ssl;
+    server_name *.artifactory.example.com;
+
+    ssl_certificate     /path/to/wildcard-artifactory.crt;
+    ssl_certificate_key /path/to/wildcard-artifactory.key;
+
+    client_max_body_size 0;
+    chunked_transfer_encoding on;
+
+    # ── Docker V2 ping ──────────────────────────────────────────────
+    location = /v2/ {
+        proxy_pass http://artifactory/artifactory/api/docker/$docker_repo/v2/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ── Location-header redirects ───────────────────────────────────
+    # Artifactory returns Location: /v2/<repo-name>/image/blobs/uploads/...
+    # in 202 responses. This block catches those redirected requests so the
+    # repo name in the path is used directly (not double-prefixed).
+    location ~ ^/v2/(teamA-docker-local|teamB-docker-local|docker-local|docker-hub-proxy|docker-dev-virtual|docker-prod-virtual)/(.*)$ {
+        rewrite ^/v2/([^/]+)/(.*)$ /artifactory/api/docker/$1/v2/$2 break;
+        proxy_pass http://artifactory;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 900;
+        proxy_send_timeout 900;
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+
+    # ── Default: all other /v2/ requests ────────────────────────────
+    # Uses $docker_repo from the host map. The full Docker path
+    # (team/image/tag) is preserved as-is inside the target repo.
+    location /v2/ {
+        rewrite ^/v2/(.*)$ /artifactory/api/docker/$docker_repo/v2/$1 break;
+        proxy_pass http://artifactory;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 900;
+        proxy_send_timeout 900;
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+}
+```
+
+**Key details:**
+
+- `X-Forwarded-Proto https` — ensures Artifactory's `Location` response
+  headers return `https://` URLs. Without this, Docker follows an HTTP
+  redirect and gets a TLS error.
+- The redirect handler (`location ~ ^/v2/(repo-name)/`) is critical.
+  Artifactory's 202 blob upload response includes the repo name in the
+  redirect URL. Without this block, the next Docker request would hit the
+  default location and double-prefix the repo name.
+- `client_max_body_size 0` — no upload limit (Docker layers can be large).
+- The `map` block is the only part that changes between layouts. The
+  location blocks are layout-agnostic.
+- Add repo names to the redirect regex whenever you create new repos.
+
+**When you DON'T need this:** Artifactory Pro with "Sub Domain" Docker
+Access Method configured. The built-in router handles `/v2/` → repo
+resolution internally based on the Host header. Your LB just needs a
+plain `proxy_pass` with `proxy_set_header Host $http_host`.
+
 Templates must be **single-quoted** in `global.env` so `${VAR}` stays
 literal until `build.sh` expands it. Shell exports override file
 values, so you can test a different layout per-invocation without
