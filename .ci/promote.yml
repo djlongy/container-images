@@ -1,176 +1,85 @@
-# Reusable promote template — sources image.env at runtime so per-image
-# ci.yml never contains version strings. Edit image.env only.
+# Reusable promote template — thin wrapper around scripts/build.sh so
+# GitLab, Bamboo, and local developer runs all share a single source of
+# truth. Per-image ci.yml files extend .promote-build with IMAGE_DIR
+# pointing at the image name.
 #
 # Jobs:
-#   .promote-build  — pull via proxy/cache, add provenance labels, push
+#   .promote-build  — calls scripts/build.sh <image> --push
 #   .promote-scan   — Trivy vulnerability gate
 #   .promote-sbom   — Syft deep SBOM generation
 #   .promote-sign   — Cosign sign + attestations (Vault Transit)
 #   .promote-notify — Vigil supply chain sync
+#   .promote-prod   — crane copy from QA to prod registry (manual)
 #
 # All downstream jobs receive variables from build.env dotenv artifact:
 #   IMAGE_NAME, BUILDKIT_TAG, IMAGE_DIGEST, TRIVY_IMAGE, SYFT_IMAGE
+# These are written by scripts/build.sh after a successful push and
+# auto-inherited via artifacts.reports.dotenv.
 #
-# All registry/auth settings come from CI/CD variables or global.env.
-# Nothing is hardcoded — configure via pipeline variables.
+# Registry / auth / mirror settings all come from CI/CD variables and
+# override the global.env.example defaults per the env-snapshot-and-
+# reapply precedence in scripts/build.sh. Nothing is hardcoded.
 
 # ── Build ─────────────────────────────────────────────────────────────
+#
+# Runs inside docker:cli with a docker:dind sidecar service so
+# scripts/build.sh can use `docker build` / `docker push` unchanged.
+# Requires a GitLab runner with privileged = true (needed for dind).
 
 .promote-build:
   stage: build
-  image:
-    name: moby/buildkit:${BUILDKIT_VERSION}
-    entrypoint: [""]
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+      alias: docker
   variables:
-    BUILDKIT_VERSION: "v0.18.2"
-    BUILDKIT_PLATFORM: "linux/amd64"
-    BUILDKIT_OCI_MEDIATYPES: "true"
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_CERT_PATH: /certs/client
+    DOCKER_TLS_VERIFY: "1"
     IMAGE_DIR: ""
+  before_script:
+    # docker:27-cli is alpine-based; scripts/build.sh needs bash, git,
+    # openssl (cert placeholder), curl (jf install for artifactory).
+    - apk add --no-cache bash git openssl curl
+    # Install jf CLI only when the artifactory backend is selected —
+    # keeps the default Harbor path fast.
+    - |
+      if [ "${REGISTRY_KIND:-}" = "artifactory" ]; then
+        curl -fL https://install-cli.jfrog.io | sh
+        mv jf /usr/local/bin/ 2>/dev/null || true
+        jf --version
+      fi
   script:
-    # Source config — image.env is the single source of truth
-    - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
-    - 'if [ -f images/${IMAGE_DIR}/image.env ]; then source images/${IMAGE_DIR}/image.env; else source images/${IMAGE_DIR}/image.env.example; fi'
-    - |
-      FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}"
-      PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
-      BASE="${SOURCE}:${TAG}"
-      echo "=== Promoting ${IMAGE_NAME} ==="
-      echo "  Source:       ${BASE}"
-      echo "  Target:       ${FULL_IMAGE}:${PROMOTED_TAG}"
-      echo "  Remediate:    ${REMEDIATE:-false}"
-      echo "  Inject certs: ${INJECT_CERTS:-false}"
-    # Preflight: validate remediate.sh exists if REMEDIATE=true
-    - |
-      if [ "${REMEDIATE:-false}" = "true" ] && [ ! -f "images/${IMAGE_DIR}/remediate.sh" ]; then
-        echo "ERROR: REMEDIATE=true but images/${IMAGE_DIR}/remediate.sh does not exist"
-        echo "Create the script or set REMEDIATE=false in image.env"
-        exit 1
-      fi
-    # Select Dockerfile: custom per-image or shared root
-    - |
-      if [ "${CUSTOM_DOCKERFILE:-false}" = "true" ] && [ -f "images/${IMAGE_DIR}/Dockerfile" ]; then
-        DOCKERFILE_DIR="images/${IMAGE_DIR}"
-        echo "  Dockerfile:   images/${IMAGE_DIR}/Dockerfile (custom)"
-      else
-        DOCKERFILE_DIR="."
-        echo "  Dockerfile:   Dockerfile (shared)"
-      fi
-    # Inject CA cert from CI variable (never stored in repo)
-    - |
-      mkdir -p certs
-      if [ "${INJECT_CERTS:-false}" = "true" ]; then
-        if [ -n "${CA_CERT:-}" ]; then
-          echo "${CA_CERT}" > certs/custom-ca.crt
-          echo "  CA cert:      injected from CI variable"
-        elif ls certs/*.crt >/dev/null 2>&1; then
-          echo "  CA cert:      using certs already on disk"
-        else
-          echo "ERROR: INJECT_CERTS=true but no CA_CERT variable and no certs on disk"
-          echo "Set CA_CERT as a CI/CD variable (paste PEM content)"
-          exit 1
-        fi
-      fi
-    # Registry auth
-    - mkdir -p /root/.docker
+    # Log into the push target so docker push inside build.sh works.
+    # build.sh itself never runs docker login — CI is responsible.
     - |
       if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
-        AUTH=$(echo -n "${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}" | base64)
-        cat > /root/.docker/config.json <<DOCKEREOF
-      {"auths":{"${PUSH_REGISTRY}":{"auth":"${AUTH}"}}}
-      DOCKEREOF
+        echo "${PUSH_REGISTRY_PASSWORD}" | docker login "${PUSH_REGISTRY}" \
+          -u "${PUSH_REGISTRY_USER}" --password-stdin
       fi
-    # Build custom labels from labels.env file (one key=value per line)
+    # CA_CERT from CI variable — build.sh's cert injection path reads
+    # this env var directly. No file manipulation needed here.
+    # For the artifactory backend, docker login to the artifactory host
+    # too (build.sh's backend script assumes you're already logged in).
     - |
-      EXTRA_LABEL_ARGS=""
-      LABELS_FILE="images/${IMAGE_DIR}/labels.env"
-      if [ -f "${LABELS_FILE}" ]; then
-        while IFS= read -r LABEL || [ -n "${LABEL}" ]; do
-          [ -z "${LABEL}" ] && continue
-          [ "${LABEL#\#}" != "${LABEL}" ] && continue
-          EXTRA_LABEL_ARGS="${EXTRA_LABEL_ARGS} --opt label:${LABEL}"
-        done < "${LABELS_FILE}"
-        echo "  Custom labels: ${LABELS_FILE}"
+      if [ "${REGISTRY_KIND:-}" = "artifactory" ] \
+         && [ -n "${ARTIFACTORY_URL:-}" ] \
+         && [ -n "${ARTIFACTORY_USER:-}" ]; then
+        ART_HOST="${ARTIFACTORY_URL#https://}"
+        ART_HOST="${ART_HOST#http://}"
+        ART_HOST="${ART_HOST%%/*}"
+        echo "${ARTIFACTORY_TOKEN:-${ARTIFACTORY_PASSWORD:-}}" \
+          | docker login "${ART_HOST}" -u "${ARTIFACTORY_USER}" --password-stdin
       fi
-    # Build and push (context = repo root for access to certs/)
-    - |
-      OCI_FLAG=""
-      if [ "${BUILDKIT_OCI_MEDIATYPES}" = "true" ]; then
-        OCI_FLAG=",oci-mediatypes=true"
-      fi
-      buildctl-daemonless.sh build \
-        --frontend dockerfile.v0 \
-        --local context="." \
-        --local dockerfile="${DOCKERFILE_DIR}" \
-        --opt filename="Dockerfile" \
-        --opt platform="${BUILDKIT_PLATFORM}" \
-        --opt build-arg:APP_VERSION="${PROMOTED_TAG}" \
-        --opt build-arg:BASE_IMAGE="${BASE}" \
-        --opt "build-arg:BUILDER_IMAGE=${BUILDER_IMAGE:-alpine:3.21}" \
-        --opt "build-arg:APK_MIRROR=${APK_MIRROR:-}" \
-        --opt build-arg:TAG="${TAG}" \
-        --opt "build-arg:VENDOR=${VENDOR:-}" \
-        --opt "build-arg:VCS_REF=${CI_COMMIT_SHA}" \
-        --opt "build-arg:BUILD_DATE=${CI_JOB_STARTED_AT}" \
-        --opt "build-arg:REMEDIATE=${REMEDIATE:-false}" \
-        --opt "build-arg:IMAGE_DIR=${IMAGE_DIR}" \
-        --opt "build-arg:INJECT_CERTS=${INJECT_CERTS:-false}" \
-        --opt "build-arg:ORIGINAL_USER=${ORIGINAL_USER:-root}" \
-        ${EXTRA_LABEL_ARGS} \
-        --output "type=image,name=${FULL_IMAGE}:${PROMOTED_TAG},push=true${OCI_FLAG}" \
-        --metadata-file metadata.json
-    # Extract manifest digest from registry (cosign needs this, not config digest)
-    # Compatible with Harbor, Artifactory, and Docker Hub registries.
-    # Tries OCI manifest first, falls back to Docker v2 manifest.
-    #
-    # Instead of parsing header names (fragile — casing varies by registry),
-    # we grep for the sha256: pattern directly. This is the only value in the
-    # response headers that matches sha256:[0-9a-f]{64} — no ambiguity.
-    - |
-      DIGEST=""
-      REPO_PATH=$(echo "${FULL_IMAGE}" | cut -d/ -f2-)
-      if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
-        AUTH_HEADER="Basic $(echo -n "${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}" | base64)"
-        for ACCEPT_TYPE in \
-          "application/vnd.oci.image.manifest.v1+json" \
-          "application/vnd.docker.distribution.manifest.v2+json"; do
-          HEADERS=$(wget -q --header="Authorization: ${AUTH_HEADER}" \
-            --header="Accept: ${ACCEPT_TYPE}" \
-            --server-response -O /dev/null \
-            "https://${PUSH_REGISTRY}/v2/${REPO_PATH}/manifests/${PROMOTED_TAG}" 2>&1 || true)
-          # Match the sha256 digest directly — registry-agnostic, no header parsing
-          # Uses -E (extended regex) for busybox/Alpine grep compatibility
-          DIGEST=$(echo "${HEADERS}" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 || true)
-          [ -n "${DIGEST}" ] && break
-        done
-      fi
-    # Validate and write build.env — single source for all downstream jobs
-    - |
-      if [ -n "$DIGEST" ] && echo "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
-        IMAGE_DIGEST="${FULL_IMAGE}@${DIGEST}"
-        echo "Manifest digest: ${DIGEST}"
-      else
-        if [ -n "$DIGEST" ]; then
-          echo "ERROR: Extracted digest has unexpected format: ${DIGEST}"
-          echo "Expected: sha256:<64 hex chars>"
-          exit 1
-        fi
-        echo "WARN: Could not extract manifest digest — using tag reference"
-        echo "Cosign signing may not discover attestations via tag-only reference"
-        IMAGE_DIGEST="${FULL_IMAGE}:${PROMOTED_TAG}"
-      fi
-      cat > build.env <<ENVEOF
-      IMAGE_NAME=${FULL_IMAGE}
-      BUILDKIT_TAG=${PROMOTED_TAG}
-      IMAGE_DIGEST=${IMAGE_DIGEST}
-      TRIVY_IMAGE=${FULL_IMAGE}:${PROMOTED_TAG}
-      SYFT_IMAGE=${FULL_IMAGE}:${PROMOTED_TAG}
-      ENVEOF
-      echo "Built and pushed: ${FULL_IMAGE}:${PROMOTED_TAG}"
+    # Single source of truth — delegate to build.sh. It handles config
+    # resolution, distro-aware remediation, cert injection (CA_CERT env
+    # → certs/custom-ca.crt), labels.env, REGISTRY_KIND dispatch,
+    # build.env emission, and digest pinning.
+    - bash ./scripts/build.sh "${IMAGE_DIR}" --push
   artifacts:
     reports:
       dotenv: build.env
-    paths:
-      - metadata.json
     expire_in: 1 week
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -235,12 +144,17 @@
     name: gcr.io/go-containerregistry/crane:debug
     entrypoint: [""]
   script:
-    - 'if [ -f global.env ]; then source global.env; else source global.env.example; fi'
-    - 'if [ -f images/${IMAGE_DIR}/image.env ]; then source images/${IMAGE_DIR}/image.env; else source images/${IMAGE_DIR}/image.env.example; fi'
+    # IMAGE_DIGEST is the QA registry ref in digest form (name@sha256:...)
+    # inherited from build.env via artifacts.reports.dotenv. Using the
+    # digest ref for the source guarantees bit-for-bit promotion — no
+    # risk of the tag getting reassigned between build and promote.
+    # BUILDKIT_TAG is the original tag we want to preserve on the
+    # destination side so downstream consumers keep their version-
+    # pinned refs.
+    - 'if [ -f images/${IMAGE_DIR}/image.env ]; then . images/${IMAGE_DIR}/image.env; else . images/${IMAGE_DIR}/image.env.example; fi'
     - |
-      PROMOTED_TAG="${TAG}-${CI_COMMIT_SHORT_SHA}"
-      SRC="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
-      DST="${PROD_PUSH_REGISTRY}/${PROD_PUSH_PROJECT:-${PUSH_PROJECT}}/${IMAGE_NAME}:${PROMOTED_TAG}"
+      SRC="${IMAGE_DIGEST}"
+      DST="${PROD_PUSH_REGISTRY}/${PROD_PUSH_PROJECT:-${PUSH_PROJECT}}/${IMAGE_NAME}:${BUILDKIT_TAG}"
       echo "=== Promoting to production ==="
       echo "  Source: ${SRC}"
       echo "  Dest:   ${DST}"
