@@ -214,8 +214,12 @@ fi
 
 # Inject CA cert — three sources, checked in order:
 #   1. CA_CERT env var (CI variable or export)
-#   2. HashiCorp Vault (if vault CLI available)
+#   2. HashiCorp Vault (OPT-IN: VAULT_CA_PATH must be set, else skipped)
 #   3. Files already in certs/ (manually dropped, gitignored)
+#
+# Vault is opt-in via VAULT_CA_PATH so the mere presence of the `vault`
+# binary never causes a blocking call. Without VAULT_CA_PATH we skip
+# Vault entirely and rely on CA_CERT env or certs/ on disk.
 #
 # The Dockerfile has an unconditional `COPY certs/*.crt /tmp/custom-ca/`
 # in the base-remediated stage, and BuildKit evaluates it even when
@@ -235,11 +239,20 @@ if [ "${INJECT_CERTS:-false}" = "true" ]; then
   if [ -n "${CA_CERT:-}" ]; then
     echo "${CA_CERT}" > "${REPO_ROOT}/certs/custom-ca.crt"
     echo "  CA cert:      injected from CA_CERT env var"
-  elif command -v vault >/dev/null 2>&1; then
-    vault kv get -mount="${VAULT_KV_MOUNT:-secret}" -field=certificate "${VAULT_CA_PATH:-pki/root-ca}" \
-      > "${REPO_ROOT}/certs/custom-ca.crt" 2>/dev/null \
-      && echo "  CA cert:      pulled from Vault" \
-      || echo "  WARN: Vault pull failed — falling back to certs/ on disk"
+  elif [ -n "${VAULT_CA_PATH:-}" ] && command -v vault >/dev/null 2>&1; then
+    # Vault is opt-in — only attempt the pull when VAULT_CA_PATH is
+    # explicitly set. VAULT_ADDR must already be exported by the caller
+    # (or ~/.vault-token configured) so the CLI has a target; we don't
+    # probe it here to avoid a blocking connect if the user just has the
+    # binary installed but no Vault configured.
+    if vault kv get -mount="${VAULT_KV_MOUNT:-secret}" \
+         -field=certificate "${VAULT_CA_PATH}" \
+         > "${REPO_ROOT}/certs/custom-ca.crt" 2>/dev/null; then
+      echo "  CA cert:      pulled from Vault (${VAULT_KV_MOUNT:-secret}/${VAULT_CA_PATH})"
+    else
+      echo "  WARN: Vault pull failed — falling back to certs/ on disk"
+      rm -f "${REPO_ROOT}/certs/custom-ca.crt"
+    fi
   fi
   # Check we have at least one cert to inject
   if ls "${REPO_ROOT}"/certs/*.crt >/dev/null 2>&1; then
