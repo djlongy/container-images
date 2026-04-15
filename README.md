@@ -77,9 +77,9 @@ mkdir -p local
 cat > local/credentials.env <<'EOF'
 export VAULT_ADDR=https://vault.example.com:8200
 export PUSH_REGISTRY_USER=admin
-export PUSH_REGISTRY_PASSWORD=$(vault kv get -field=admin_password kv-mgt/apps/harbor/runtime)
+export PUSH_REGISTRY_PASSWORD=$(vault kv get -field=admin_password kv/apps/harbor/runtime)
 export ARTIFACTORY_USER=abcd
-export ARTIFACTORY_PASSWORD=$(vault kv get -field=abcd_password kv-mgt/apps/artifactory/runtime)
+export ARTIFACTORY_PASSWORD=$(vault kv get -field=abcd_password kv/apps/artifactory/runtime)
 export ARTIFACTORY_TEAM=abcd
 EOF
 source local/credentials.env    # then run any build.sh command
@@ -121,7 +121,10 @@ All settings come from environment variables or CI/CD pipeline variables.
 
 | Variable | Where to set | Purpose |
 |----------|-------------|---------|
-| `PULL_REGISTRY` | global.env / CI variable | Registry proxy/cache base images are pulled FROM |
+| `PULL_REGISTRY` | global.env / CI variable | Registry proxy host for pulls (single-host / path-routed model) |
+| `DOCKERHUB_MIRROR` | global.env / CI variable | Docker Hub mirror host — default `${PULL_REGISTRY}/docker-hub`; override for subdomain-routed proxies |
+| `GHCR_MIRROR` | global.env / CI variable | GHCR mirror host — default `${PULL_REGISTRY}/ghcr-proxy` |
+| `QUAY_MIRROR` | global.env / CI variable | Quay mirror host — default `${PULL_REGISTRY}/quay-proxy` |
 | `PUSH_REGISTRY` | global.env / CI variable | Registry built images are pushed TO (defaults to `${PULL_REGISTRY}`) |
 | `PUSH_PROJECT` | global.env / CI variable | Target project/repo prefix |
 | `VENDOR` | global.env / CI variable | Vendor label value |
@@ -130,8 +133,11 @@ All settings come from environment variables or CI/CD pipeline variables.
 | `CA_CERT` | CI variable | PEM content of CA cert to inject |
 | `FORCE_ALL` | CI variable | `true` to rebuild all images |
 | `ENABLE_PROD_PROMOTE` | CI variable | `true` to show manual promote-to-prod jobs |
-| `BUILDER_IMAGE` | global.env / CI variable | Alpine image for cert builder stage (via registry proxy) |
+| `BUILDER_IMAGE` | global.env / CI variable | Alpine image for cert builder stage — default `${DOCKERHUB_MIRROR}/library/alpine:3.21` |
 | `APK_MIRROR` | global.env / CI variable | Alpine apk mirror base URL (replaces dl-cdn.alpinelinux.org/alpine) |
+| `APT_MIRROR` | global.env / CI variable | Debian/Ubuntu apt proxy base URL for remediation |
+| `REGISTRY_KIND` | CI variable | `artifactory` to route `--push` through the Artifactory backend |
+| `ARTIFACTORY_*` | CI variable (masked) | See "Switching layouts" and `scripts/push-backends/artifactory.sh` header for the full set — URL, user, token, team, environment, layout template overrides, build-info metadata |
 | `PROD_PUSH_REGISTRY` | CI variable | Production registry hostname |
 | `PROD_PUSH_PROJECT` | CI variable | Prod project/path (defaults to `PUSH_PROJECT`) |
 | `PROD_PUSH_REGISTRY_USER` | CI variable | Prod registry username |
@@ -141,22 +147,33 @@ All settings come from environment variables or CI/CD pipeline variables.
 
 ```
 container-images/
-├── Dockerfile              # Shared template (labels + remediation + certs)
-├── certs/                  # CA certs injected at build time (gitignored)
-├── global.env.example      # Versioned template — cp to global.env and edit
-├── global.env              # Local overrides (gitignored)
+├── Dockerfile                   # Shared template (labels + remediation + certs)
+├── certs/                       # CA certs injected at build time (gitignored)
+├── global.env.example           # Versioned template — cp to global.env and edit
+├── global.env                   # Local overrides (gitignored)
+├── local/                       # Gitignored workspace for test runners, creds, cheat sheets
 ├── .ci/
-│   └── promote.yml         # Reusable CI template (sources image.env at runtime)
+│   ├── promote.yml              # Reusable GitLab CI template (delegates to scripts/build.sh)
+│   ├── image-ci.yml.template    # Per-image ci.yml generator template
+│   ├── check-updates.yml        # Upstream tag drift scanner (GitLab)
+│   └── validate-ci.yml          # Lint / sanity stages
+├── bamboo-specs/
+│   └── bamboo.yaml              # Bamboo plan spec — 1:1 parity with .ci/promote.yml
 ├── scripts/
-│   └── build.sh            # Agnostic local build script
+│   ├── build.sh                 # Agnostic local build + push script (single source of truth)
+│   ├── add-image.sh             # Scaffold images/<name>/ + ci.yml
+│   ├── check-updates.sh         # Upstream tag drift scanner
+│   ├── remediate/               # Distro-aware remediation defaults (alpine/debian/ubuntu/ubi)
+│   └── push-backends/
+│       └── artifactory.sh       # Pluggable push backend for REGISTRY_KIND=artifactory
 ├── images/
 │   └── <name>/
-│       ├── image.env.example  # Versioned template — cp to image.env
-│       ├── image.env          # Local overrides (gitignored)
-│       ├── ci.yml             # GitLab CI jobs — boilerplate, no version strings
-│       ├── remediate.sh       # (optional) CVE remediation script
-│       └── Dockerfile         # (optional) Custom override — only if shared won't do
-├── .gitlab-ci.yml          # Root pipeline (includes per-image ci.yml)
+│       ├── image.env.example    # Versioned template — cp to image.env
+│       ├── image.env            # Local overrides (gitignored)
+│       ├── ci.yml               # GitLab CI jobs — boilerplate, no version strings
+│       ├── remediate.sh         # (optional) CVE remediation override
+│       └── Dockerfile           # (optional) Custom override — only if shared won't do
+├── .gitlab-ci.yml               # Root GitLab pipeline (includes per-image ci.yml)
 └── README.md
 ```
 

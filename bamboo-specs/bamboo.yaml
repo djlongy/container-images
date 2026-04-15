@@ -10,13 +10,24 @@
 # Harbor via scripts/push-backends/artifactory.sh.
 #
 #   # ── Pull + push baseline (always required) ───
-#   PULL_REGISTRY           Registry proxy base images are pulled from
+#   PULL_REGISTRY           Registry proxy host for pulls (single-host model)
 #   PUSH_REGISTRY           Registry built images are pushed to
 #   PUSH_PROJECT            Project/repo prefix in the push registry
 #   PUSH_REGISTRY_USER      Push-target username
 #   PUSH_REGISTRY_PASSWORD  Push-target password
 #   VENDOR                  Vendor label value
 #   CA_CERT                 (optional) PEM content of CA cert to inject
+#
+#   # ── Multi-upstream mirrors (optional; see README) ───
+#   # Subdomain-routed proxies (Artifactory Pro subdomain mode or an
+#   # nginx map block) serve each upstream from a different hostname.
+#   # Set per-upstream — defaults fall back to path-style under
+#   # PULL_REGISTRY so single-host setups keep working unchanged.
+#   DOCKERHUB_MIRROR        e.g. dockerhub.artifactory.example.com
+#   GHCR_MIRROR             e.g. ghcr.artifactory.example.com
+#   QUAY_MIRROR             e.g. quay.artifactory.example.com
+#   BUILDER_IMAGE           Alpine image for cert injection jobs
+#                           (default ${DOCKERHUB_MIRROR}/library/alpine:3.21)
 #
 #   # ── Air-gapped / mirrored build (optional) ───
 #   APK_MIRROR              Raw-proxy URL for Alpine apk (dl-cdn substitute)
@@ -29,14 +40,28 @@
 #   PROD_PUSH_REGISTRY_PASSWORD  Prod registry password
 #
 #   # ── Artifactory backend (optional) ──────────
-#   REGISTRY_KIND            Set to "artifactory" to enable
-#   ARTIFACTORY_URL          https://artifactory.example.com
-#   ARTIFACTORY_USER         Team/service user with push rights
-#   ARTIFACTORY_TOKEN        Access token (preferred) OR
-#   ARTIFACTORY_PASSWORD     basic-auth password
-#   ARTIFACTORY_TEAM         Routing prefix — your team acronym
-#   ARTIFACTORY_ENVIRONMENT  dev|prod → -docker-local / -docker-prod
-#   ARTIFACTORY_PROPERTIES   Extra ;-separated props (optional)
+#   REGISTRY_KIND             Set to "artifactory" to enable
+#   ARTIFACTORY_URL           https://artifactory.example.com (REST API)
+#   ARTIFACTORY_USER          Team/service user with push rights
+#   ARTIFACTORY_TOKEN         Access token (preferred) OR
+#   ARTIFACTORY_PASSWORD      basic-auth password
+#   ARTIFACTORY_TEAM          Routing prefix — your team acronym
+#   ARTIFACTORY_ENVIRONMENT   dev|prod; exposed to layout templates
+#                             as ${ARTIFACTORY_ENVIRONMENT} and derived
+#                             ${ARTIFACTORY_REPO_SUFFIX} (dev→local,
+#                             prod→prod) for legacy presets
+#   ARTIFACTORY_PUSH_HOST     docker push hostname for subdomain layouts
+#                             (e.g. docker.artifactory.example.com).
+#                             Defaults to host portion of ARTIFACTORY_URL.
+#   ARTIFACTORY_IMAGE_REF     Layout template for the docker push URL.
+#                             See "Artifactory layout templates" section
+#                             in global.env.example for five presets.
+#   ARTIFACTORY_MANIFEST_PATH Layout template for the REST storage path
+#                             used by jf rt set-props.
+#   ARTIFACTORY_BUILD_NAME    Defaults to image name
+#   ARTIFACTORY_BUILD_NUMBER  Defaults to ${bamboo_buildResultKey} via
+#                             build.sh's fallback chain
+#   ARTIFACTORY_PROPERTIES    Extra ;-separated props (optional)
 #
 #   # ── Pipeline control ────────────────────────
 #   FORCE_ALL                "true" rebuilds every image regardless of
@@ -151,16 +176,45 @@ build-prometheus:
           # preserves anything set here so file values in global.env.example
           # / images/<name>/image.env.example act as defaults only.
           for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     DOCKERHUB_MIRROR GHCR_MIRROR QUAY_MIRROR BUILDER_IMAGE \
                      PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
                      APK_MIRROR APT_MIRROR CA_CERT \
                      REGISTRY_KIND \
                      ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
                      ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF \
+                     ARTIFACTORY_MANIFEST_PATH \
+                     ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER \
                      ARTIFACTORY_PROPERTIES; do
             bv="bamboo_${var}"
             eval "val=\${${bv}:-}"
             [ -n "${val}" ] && export "${var}=${val}"
           done
+
+          # Log into the push target (build.sh never runs docker login —
+          # CI is responsible). Matches .ci/promote.yml behaviour.
+          if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+            echo "${PUSH_REGISTRY_PASSWORD}" | docker login "${PUSH_REGISTRY}" \
+              -u "${PUSH_REGISTRY_USER}" --password-stdin
+          fi
+
+          # Artifactory backend needs its own docker login (and jf CLI).
+          if [ "${REGISTRY_KIND:-}" = "artifactory" ]; then
+            if ! command -v jf >/dev/null 2>&1; then
+              curl -fL https://install-cli.jfrog.io | sh
+              sudo mv jf /usr/local/bin/ 2>/dev/null || mv jf "${HOME}/.local/bin/" 2>/dev/null || true
+            fi
+            ART_HOST="${ARTIFACTORY_PUSH_HOST:-}"
+            if [ -z "${ART_HOST}" ] && [ -n "${ARTIFACTORY_URL:-}" ]; then
+              ART_HOST="${ARTIFACTORY_URL#https://}"
+              ART_HOST="${ART_HOST#http://}"
+              ART_HOST="${ART_HOST%%/*}"
+            fi
+            if [ -n "${ART_HOST}" ] && [ -n "${ARTIFACTORY_USER:-}" ]; then
+              echo "${ARTIFACTORY_TOKEN:-${ARTIFACTORY_PASSWORD:-}}" \
+                | docker login "${ART_HOST}" -u "${ARTIFACTORY_USER}" --password-stdin
+            fi
+          fi
 
           ./scripts/build.sh prometheus --push
   artifacts:
@@ -301,16 +355,45 @@ build-nginx:
           fi
 
           for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     DOCKERHUB_MIRROR GHCR_MIRROR QUAY_MIRROR BUILDER_IMAGE \
                      PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
                      APK_MIRROR APT_MIRROR CA_CERT \
                      REGISTRY_KIND \
                      ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
                      ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF \
+                     ARTIFACTORY_MANIFEST_PATH \
+                     ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER \
                      ARTIFACTORY_PROPERTIES; do
             bv="bamboo_${var}"
             eval "val=\${${bv}:-}"
             [ -n "${val}" ] && export "${var}=${val}"
           done
+
+          # Log into the push target (build.sh never runs docker login —
+          # CI is responsible). Matches .ci/promote.yml behaviour.
+          if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+            echo "${PUSH_REGISTRY_PASSWORD}" | docker login "${PUSH_REGISTRY}" \
+              -u "${PUSH_REGISTRY_USER}" --password-stdin
+          fi
+
+          # Artifactory backend needs its own docker login (and jf CLI).
+          if [ "${REGISTRY_KIND:-}" = "artifactory" ]; then
+            if ! command -v jf >/dev/null 2>&1; then
+              curl -fL https://install-cli.jfrog.io | sh
+              sudo mv jf /usr/local/bin/ 2>/dev/null || mv jf "${HOME}/.local/bin/" 2>/dev/null || true
+            fi
+            ART_HOST="${ARTIFACTORY_PUSH_HOST:-}"
+            if [ -z "${ART_HOST}" ] && [ -n "${ARTIFACTORY_URL:-}" ]; then
+              ART_HOST="${ARTIFACTORY_URL#https://}"
+              ART_HOST="${ART_HOST#http://}"
+              ART_HOST="${ART_HOST%%/*}"
+            fi
+            if [ -n "${ART_HOST}" ] && [ -n "${ARTIFACTORY_USER:-}" ]; then
+              echo "${ARTIFACTORY_TOKEN:-${ARTIFACTORY_PASSWORD:-}}" \
+                | docker login "${ART_HOST}" -u "${ARTIFACTORY_USER}" --password-stdin
+            fi
+          fi
 
           ./scripts/build.sh nginx --push
   artifacts:
@@ -447,16 +530,45 @@ build-sonarqube:
           fi
 
           for var in PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+                     DOCKERHUB_MIRROR GHCR_MIRROR QUAY_MIRROR BUILDER_IMAGE \
                      PUSH_REGISTRY_USER PUSH_REGISTRY_PASSWORD \
                      APK_MIRROR APT_MIRROR CA_CERT \
                      REGISTRY_KIND \
                      ARTIFACTORY_URL ARTIFACTORY_USER ARTIFACTORY_PASSWORD \
                      ARTIFACTORY_TOKEN ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
+                     ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF \
+                     ARTIFACTORY_MANIFEST_PATH \
+                     ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER \
                      ARTIFACTORY_PROPERTIES; do
             bv="bamboo_${var}"
             eval "val=\${${bv}:-}"
             [ -n "${val}" ] && export "${var}=${val}"
           done
+
+          # Log into the push target (build.sh never runs docker login —
+          # CI is responsible). Matches .ci/promote.yml behaviour.
+          if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
+            echo "${PUSH_REGISTRY_PASSWORD}" | docker login "${PUSH_REGISTRY}" \
+              -u "${PUSH_REGISTRY_USER}" --password-stdin
+          fi
+
+          # Artifactory backend needs its own docker login (and jf CLI).
+          if [ "${REGISTRY_KIND:-}" = "artifactory" ]; then
+            if ! command -v jf >/dev/null 2>&1; then
+              curl -fL https://install-cli.jfrog.io | sh
+              sudo mv jf /usr/local/bin/ 2>/dev/null || mv jf "${HOME}/.local/bin/" 2>/dev/null || true
+            fi
+            ART_HOST="${ARTIFACTORY_PUSH_HOST:-}"
+            if [ -z "${ART_HOST}" ] && [ -n "${ARTIFACTORY_URL:-}" ]; then
+              ART_HOST="${ARTIFACTORY_URL#https://}"
+              ART_HOST="${ART_HOST#http://}"
+              ART_HOST="${ART_HOST%%/*}"
+            fi
+            if [ -n "${ART_HOST}" ] && [ -n "${ARTIFACTORY_USER:-}" ]; then
+              echo "${ARTIFACTORY_TOKEN:-${ARTIFACTORY_PASSWORD:-}}" \
+                | docker login "${ART_HOST}" -u "${ARTIFACTORY_USER}" --password-stdin
+            fi
+          fi
 
           ./scripts/build.sh sonarqube --push
   artifacts:
