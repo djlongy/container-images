@@ -85,7 +85,7 @@ TAG="TODO"
 # DISTRO controls which remediation script is applied when REMEDIATE=true.
 # One of: alpine, debian, ubuntu, ubi, busybox, scratch
 DISTRO="TODO"
-SOURCE="\${PULL_REGISTRY}/docker-hub/library/${NAME}"
+SOURCE="\${DOCKERHUB_MIRROR}/library/${NAME}"
 
 # ── Optional: registry destination ───────────────────────────────────
 # PUSH_PROJECT="myproject"

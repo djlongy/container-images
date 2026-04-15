@@ -255,11 +255,15 @@ If your environment has no direct internet access, all external dependencies
 can be routed through a registry proxy (Nexus, Artifactory, Harbor, etc.).
 Three variables control this — all set in `global.env` or as CI variables:
 
-**`PULL_REGISTRY`** — Docker image proxy (already required for `SOURCE` in image.env).
+**`PULL_REGISTRY`** — Docker image proxy host (single-host / path-routed model).
+See "Multi-Upstream Mirrors" below if your registry serves each upstream from a
+different subdomain instead of a different path.
 
 **`BUILDER_IMAGE`** — The Alpine image used internally for cert building.
-Defaults to `${PULL_REGISTRY}/docker-hub/library/alpine:3.21` so it pulls through
-your Docker Hub proxy instead of hitting Docker Hub directly.
+Defaults to `${DOCKERHUB_MIRROR}/library/alpine:3.21`, which resolves to
+`${PULL_REGISTRY}/docker-hub/library/alpine:3.21` on path-routed setups and
+to `dockerhub.artifactory.example.com/library/alpine:3.21` (or similar) on
+subdomain-routed setups — no override needed for either model.
 
 **`APK_MIRROR`** — Alpine package mirror base URL. Replaces
 `dl-cdn.alpinelinux.org/alpine` in `/etc/apk/repositories` so `apk` fetches
@@ -268,9 +272,48 @@ are preserved automatically.
 
 ```bash
 # global.env — example for Nexus
-BUILDER_IMAGE="${BUILDER_IMAGE:-${PULL_REGISTRY}/docker-hub/library/alpine:3.21}"
+BUILDER_IMAGE="${BUILDER_IMAGE:-${DOCKERHUB_MIRROR}/library/alpine:3.21}"
 APK_MIRROR="${APK_MIRROR:-https://nexus.example.com/repository/alpine-proxy}"
 ```
+
+#### Multi-Upstream Mirrors
+
+Not every image comes from Docker Hub. GHCR, Quay, and registry.k8s.io are
+common second-hop upstreams for things like `trivy`, `cosign`, and
+`kube-state-metrics`. There are two ways to route them:
+
+**Path-routed proxy (Harbor, Nexus, JCR Free/Pro path mode)** — one hostname
+fronts every upstream via different path prefixes. `image.env` references the
+`PULL_REGISTRY` hostname plus the proxy-path prefix:
+
+```bash
+SOURCE="${PULL_REGISTRY}/docker-hub/library/nginx"
+SOURCE="${PULL_REGISTRY}/ghcr-proxy/owner/tool"
+SOURCE="${PULL_REGISTRY}/quay-proxy/aquasec/trivy"
+```
+
+**Subdomain-routed proxy (Artifactory Pro subdomain mode, or an nginx sidecar
+with a `map $host $docker_repo` block)** — each upstream gets its own
+hostname. `global.env` exposes one var per upstream:
+
+```bash
+# global.env
+DOCKERHUB_MIRROR="${DOCKERHUB_MIRROR:-dockerhub.artifactory.example.com}"
+GHCR_MIRROR="${GHCR_MIRROR:-ghcr.artifactory.example.com}"
+QUAY_MIRROR="${QUAY_MIRROR:-quay.artifactory.example.com}"
+```
+
+```bash
+# images/<name>/image.env — pick the right var per upstream
+SOURCE="${DOCKERHUB_MIRROR}/library/nginx"
+SOURCE="${GHCR_MIRROR}/owner/tool"
+SOURCE="${QUAY_MIRROR}/aquasec/trivy"
+```
+
+The named vars default to `${PULL_REGISTRY}/docker-hub`, `${PULL_REGISTRY}/ghcr-proxy`,
+and `${PULL_REGISTRY}/quay-proxy` respectively, so a path-routed setup still
+works if your `image.env` files reference the named vars — you get the
+subdomain-style indirection without having to run real subdomains.
 
 #### Nexus Sonatype Setup
 
@@ -552,7 +595,7 @@ Free path.
 IMAGE_NAME="prometheus"                                   # Repo name in target registry
 TAG="v3.11.0"                                             # Upstream tag to pull
 DISTRO="busybox"                                          # Base distro (alpine|debian|ubuntu|ubi|busybox|scratch)
-SOURCE="${PULL_REGISTRY}/docker-hub/prom/prometheus"      # Pull path (via proxy/cache)
+SOURCE="${DOCKERHUB_MIRROR}/prom/prometheus"              # Pull path — see "Multi-Upstream Mirrors" below
 
 # ── Optional: registry destination ───────────────────────────────────
 # Override global PUSH_PROJECT for per-tenant or per-team paths.
