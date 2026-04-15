@@ -17,6 +17,7 @@ include:
   # Local templates
   - local: '.ci/promote.yml'
   - local: '.ci/check-updates.yml'
+  - local: '.ci/renovate.yml'
   - local: '.ci/validate-ci.yml'
   # Per-image pipeline definitions
   - local: 'images/prometheus/ci.yml'
