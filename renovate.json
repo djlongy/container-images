@@ -1,0 +1,66 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":rebaseStalePrs",
+    "group:recommended"
+  ],
+  "timezone": "Australia/Sydney",
+  "schedule": [
+    "after 9pm every weekday",
+    "before 6am every weekday",
+    "every weekend"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "labels": ["renovate", "base-image-bump"],
+  "commitMessagePrefix": "chore(images):",
+  "commitMessageTopic": "{{depName}}",
+  "commitMessageAction": "bump",
+  "branchPrefix": "renovate/",
+  "rangeStrategy": "pin",
+  "separateMinorPatch": true,
+  "separateMajorMinor": true,
+  "dependencyDashboardTitle": "Renovate — base image promotion dashboard",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^images/[^/]+/image\\.env\\.example$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s*\\nTAG=\"(?<currentValue>[^\"]+)\""
+      ],
+      "versioningTemplate": "{{#if versioning}}{{versioning}}{{else}}docker{{/if}}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Regex manager updates — give them clean labels and keep major bumps out of minor/patch PRs.",
+      "matchManagers": ["custom.regex"],
+      "addLabels": ["image:{{depName}}"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "images"
+    },
+    {
+      "description": "SonarQube Community only — ignore developer/enterprise/datacenter editions.",
+      "matchDepNames": ["library/sonarqube"],
+      "allowedVersions": "/community$/"
+    },
+    {
+      "description": "nginx — pin to the alpine variant we build on.",
+      "matchDepNames": ["library/nginx"],
+      "allowedVersions": "/alpine$/"
+    },
+    {
+      "description": "Major base-image bumps are risky — don't auto-merge, add review label.",
+      "matchManagers": ["custom.regex"],
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["review:major-bump"],
+      "prPriority": -1
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security", "base-image-bump"]
+  }
+}
