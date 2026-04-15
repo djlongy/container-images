@@ -1,0 +1,58 @@
+# Renovate bot — self-hosted runner for this project
+#
+# Runs the Renovate container against THIS repo to open MRs for base-image
+# tag bumps detected via the regex manager in renovate.json.
+#
+# Setup (one-time):
+#   1. Create a GitLab bot account (or use an existing project access token)
+#      with scopes: api, write_repository.
+#   2. Store the token as a masked+protected CI/CD variable: RENOVATE_TOKEN
+#   3. (Recommended) Store a GitHub PAT with public-repo read as GITHUB_COM_TOKEN
+#      — Renovate uses it to fetch release notes and avoid public Docker Hub
+#      rate limits.
+#   4. GitLab → CI/CD → Schedules → New schedule
+#        - Description: Renovate base-image bumps
+#        - Interval: 0 18 * * * (daily 6pm — inside the renovate.json schedule window)
+#        - Target branch: main
+#        - Variable: RENOVATE_RUN=true
+#
+# Manual trigger (dry-run / debug):
+#   Pipelines → Run pipeline → set variables:
+#     RENOVATE_RUN=true
+#     RENOVATE_DRY_RUN=full       # or "lookup" for cheap dep-discovery only
+#     LOG_LEVEL=debug
+#
+# The job is hidden behind RENOVATE_RUN so it never fires on normal pushes
+# or MR pipelines — only on schedule or an explicit manual run.
+
+renovate:
+  stage: .pre
+  image:
+    name: renovate/renovate:latest
+    entrypoint: [""]
+  variables:
+    # Point Renovate at the GitLab instance this pipeline is running on.
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ENDPOINT: "${CI_API_V4_URL}"
+    RENOVATE_REPOSITORIES: "${CI_PROJECT_PATH}"
+    RENOVATE_GIT_AUTHOR: "Renovate Bot <renovate@${CI_SERVER_HOST}>"
+    RENOVATE_ONBOARDING: "false"
+    RENOVATE_REQUIRE_CONFIG: "required"
+    RENOVATE_CONFIG_FILE: "renovate.json"
+    # Let PRs post to the dashboard issue for visibility.
+    RENOVATE_DEPENDENCY_DASHBOARD: "true"
+    LOG_LEVEL: "info"
+  before_script:
+    # Inject self-signed CA if the GitLab instance uses one (homelab pattern).
+    - if [ -n "${CA_CERT:-}" ]; then
+        echo "${CA_CERT}" > /usr/local/share/ca-certificates/homelab-ca.crt &&
+        update-ca-certificates;
+      fi
+  script:
+    - 'export RENOVATE_TOKEN="${RENOVATE_TOKEN:?RENOVATE_TOKEN must be set in CI/CD variables}"'
+    - 'if [ -n "${GITHUB_COM_TOKEN:-}" ]; then export GITHUB_COM_TOKEN; fi'
+    - renovate
+  rules:
+    - if: '$RENOVATE_RUN == "true"'
+  tags:
+    - docker
