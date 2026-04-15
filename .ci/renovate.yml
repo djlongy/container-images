@@ -1,0 +1,62 @@
+# Renovate bot — self-hosted runner for this project
+#
+# Runs the Renovate container against THIS repo to open MRs for base-image
+# tag bumps detected via the regex manager in renovate.json.
+#
+# Setup (one-time):
+#   1. Create a GitLab bot user or project access token with scopes
+#      `api` + `write_repository`. Store as masked CI/CD variable
+#      RENOVATE_TOKEN. (Homelab: kv-mgt/apps/gitlab/renovate-bot.)
+#   2. (Recommended) Store a GitHub PAT with `public_repo` read as
+#      GITHUB_COM_TOKEN — Renovate uses it to fetch release notes and
+#      avoid public Docker Hub rate limits.
+#   3. GitLab → CI/CD → Schedules → New schedule
+#        - Target branch: main
+#        - Cron: 0 18 * * * (Australia/Sydney — inside the renovate.json
+#          schedule window of "after 9pm weekdays / weekends")
+#        - Variable: RENOVATE_RUN=true
+#
+# Manual trigger (debug / ad-hoc):
+#   Pipelines → Run pipeline → target main, set variables:
+#     RENOVATE_RUN=true
+#     RENOVATE_DRY_RUN=full      (optional: cheap dry run, no MRs created)
+#     LOG_LEVEL=debug            (optional)
+#
+# Stage note: `stage: verify`, not `.pre`. The upstream
+# `infra/gitlab-ci-templates/devsecops.yml` hidden jobs in `.pre` interact
+# poorly with adding a new job to that stage — GitLab silently drops the
+# whole pipeline as "empty" even when rules would otherwise match. Any
+# named stage (verify, test, …) avoids that interaction.
+
+renovate:
+  stage: verify
+  image:
+    name: renovate/renovate:latest
+    entrypoint: [""]
+  variables:
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ENDPOINT: "${CI_API_V4_URL}"
+    RENOVATE_REPOSITORIES: "${CI_PROJECT_PATH}"
+    RENOVATE_GIT_AUTHOR: "Renovate Bot <renovate@${CI_SERVER_HOST}>"
+    RENOVATE_ONBOARDING: "false"
+    RENOVATE_REQUIRE_CONFIG: "required"
+    RENOVATE_CONFIG_FILE: "renovate.json"
+    RENOVATE_DEPENDENCY_DASHBOARD: "true"
+    LOG_LEVEL: "info"
+  before_script:
+    - if [ -n "${CA_CERT:-}" ]; then
+        echo "${CA_CERT}" > /usr/local/share/ca-certificates/homelab-ca.crt &&
+        update-ca-certificates;
+      fi
+  script:
+    - 'export RENOVATE_TOKEN="${RENOVATE_TOKEN:?RENOVATE_TOKEN must be set in CI/CD variables}"'
+    - 'if [ -n "${GITHUB_COM_TOKEN:-}" ]; then export GITHUB_COM_TOKEN; fi'
+    - renovate
+  rules:
+    # Scheduled runs — variable RENOVATE_RUN=true set on the schedule acts
+    # as a safety net so other schedules can't accidentally trigger Renovate.
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $RENOVATE_RUN == "true"'
+    # Manual web-UI runs — variables passed in the "Run pipeline" form.
+    - if: '$CI_PIPELINE_SOURCE == "web" && $RENOVATE_RUN == "true"'
+    # API-triggered runs — for testing and tooling.
+    - if: '$CI_PIPELINE_SOURCE == "api" && $RENOVATE_RUN == "true"'
