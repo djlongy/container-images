@@ -249,6 +249,24 @@ _artifactory_require_tools() {
 _artifactory_jf_config() {
   local secret="${ARTIFACTORY_TOKEN:-${ARTIFACTORY_PASSWORD}}"
   local auth_flag
+
+  # Sanitize ARTIFACTORY_URL: strip trailing slashes, validate scheme,
+  # avoid doubling /artifactory suffix.
+  local _url="${ARTIFACTORY_URL%/}"
+  if [[ ! "${_url}" =~ ^https?:// ]]; then
+    echo "ERROR: ARTIFACTORY_URL must start with http:// or https://" >&2
+    echo "       Got: ${_url}" >&2
+    echo "       Example: https://artifactory.example.com" >&2
+    return 1
+  fi
+  local _art_url
+  if [[ "${_url}" == */artifactory ]]; then
+    _art_url="${_url}"
+    _url="${_url%/artifactory}"
+  else
+    _art_url="${_url}/artifactory"
+  fi
+
   if [ -n "${ARTIFACTORY_TOKEN:-}" ]; then
     auth_flag="--access-token=${secret}"
   else
@@ -256,8 +274,8 @@ _artifactory_jf_config() {
   fi
   # shellcheck disable=SC2086
   jf config add container-images-artifactory \
-    --url="${ARTIFACTORY_URL}" \
-    --artifactory-url="${ARTIFACTORY_URL}/artifactory" \
+    --url="${_url}" \
+    --artifactory-url="${_art_url}" \
     --user="${ARTIFACTORY_USER}" \
     ${auth_flag} \
     --interactive=false \
