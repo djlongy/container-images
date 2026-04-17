@@ -55,7 +55,10 @@ emit_build_env() {
 IMAGE_REF=${full_image}
 IMAGE_NAME=${name}
 IMAGE_TAG=${tag}
+BUILDKIT_TAG=${tag}
 IMAGE_DIGEST=${image_digest}
+TRIVY_IMAGE=${image_digest}
+SYFT_IMAGE=${image_digest}
 UPSTREAM_TAG=${UPSTREAM_TAG}
 UPSTREAM_REF=${UPSTREAM_REF}
 BASE_DIGEST=${BASE_DIGEST:-}
