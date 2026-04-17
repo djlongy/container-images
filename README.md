@@ -13,7 +13,7 @@ variables or CI/CD pipeline variables — nothing is hardcoded.
 
 ### Bump an existing image tag
 
-1. Edit `images/<name>/image.env.example` — update `TAG`
+1. Edit `images/<name>/image.env.example` — update `UPSTREAM_TAG`
 2. Push to `main`
 3. Pipeline builds, scans, signs only the changed image
 
@@ -30,7 +30,7 @@ example for shared/CI changes.)
 This scaffolds `images/redis/` with `image.env.example` and `ci.yml`, and
 adds the include to `.gitlab-ci.yml`. Then:
 
-1. Edit `images/redis/image.env.example` — set `TAG`, `DISTRO`, `SOURCE`
+1. Edit `images/redis/image.env.example` — set `UPSTREAM_REGISTRY`, `UPSTREAM_IMAGE`, `UPSTREAM_TAG`, `DISTRO`
 2. Push to `main`
 
 The `ci.yml` is auto-generated from `.ci/image-ci.yml.template` — never edit
@@ -105,7 +105,7 @@ PULL_REGISTRY=harbor.example.com ./scripts/build.sh nginx
 ./scripts/check-updates.sh --create-pr     # GitHub/Bitbucket: open PR per update
 ```
 
-Compares current TAG in each `image.env` against upstream registry tags.
+Compares current `UPSTREAM_TAG` in each `image.env` against upstream registry tags.
 Handles suffixed tags (e.g. `-alpine`, `-slim`) by matching only equivalent
 variants. Run on a schedule to replace Renovate-style mutable tag pulling
 with pinned version proposals.
@@ -133,11 +133,19 @@ All settings come from environment variables or CI/CD pipeline variables.
 | `CA_CERT` | CI variable | PEM content of CA cert to inject |
 | `FORCE_ALL` | CI variable | `true` to rebuild all images |
 | `ENABLE_PROD_PROMOTE` | CI variable | `true` to show manual promote-to-prod jobs |
-| `BUILDER_IMAGE` | global.env / CI variable | Alpine image for cert builder stage — default `${DOCKERHUB_MIRROR}/library/alpine:3.21` |
 | `APK_MIRROR` | global.env / CI variable | Alpine apk mirror base URL (replaces dl-cdn.alpinelinux.org/alpine) |
 | `APT_MIRROR` | global.env / CI variable | Debian/Ubuntu apt proxy base URL for remediation |
 | `REGISTRY_KIND` | CI variable | `artifactory` to route `--push` through the Artifactory backend |
-| `ARTIFACTORY_*` | CI variable (masked) | See "Switching layouts" and `scripts/push-backends/artifactory.sh` header for the full set — URL, user, token, team, environment, layout template overrides, build-info metadata |
+| `ARTIFACTORY_URL` | CI variable | Artifactory base URL (`https://artifactory.example.com` or `https://yourorg.jfrog.io`) |
+| `ARTIFACTORY_USER` | CI variable | User with Deploy rights |
+| `ARTIFACTORY_TOKEN` | CI variable (masked) | Access token (preferred) or `ARTIFACTORY_PASSWORD` for basic auth |
+| `ARTIFACTORY_TEAM` | CI variable | Team acronym — referenced by layout templates. **Never committed.** |
+| `ARTIFACTORY_PRO` | CI variable | Set to `true` to enable Pro features: `jf docker push`, project-scoped build info, Xray scan |
+| `ARTIFACTORY_PROJECT` | CI variable | Project key for `--project` flag (defaults to `ARTIFACTORY_TEAM`) |
+| `ARTIFACTORY_SBOM_REPO` | CI variable | Xray-indexed generic repo for SBOM upload via `scripts/sbom-post.sh` |
+| `JF_BINARY_URL` | CI variable | Direct URL to `jf` binary for air-gapped auto-install |
+| `JF_INSTALLER_URL` | CI variable | URL to JFrog CLI installer script (default: `https://install.jfrog.io`) |
+| `AUTHORS` | CI variable | `org.opencontainers.image.authors` label (default: `Platform Engineering`) |
 | `PROD_PUSH_REGISTRY` | CI variable | Production registry hostname |
 | `PROD_PUSH_PROJECT` | CI variable | Prod project/path (defaults to `PUSH_PROJECT`) |
 | `PROD_PUSH_REGISTRY_USER` | CI variable | Prod registry username |
@@ -163,7 +171,10 @@ container-images/
 │   ├── build.sh                 # Agnostic local build + push script (single source of truth)
 │   ├── add-image.sh             # Scaffold images/<name>/ + ci.yml
 │   ├── check-updates.sh         # Upstream tag drift scanner
+│   ├── sbom-post.sh             # Ship CycloneDX SBOM to webhook / Dependency-Track / Artifactory Xray
 │   ├── remediate/               # Distro-aware remediation defaults (alpine/debian/ubuntu/ubi)
+│   ├── lib/
+│   │   └── build-info-merge.py  # Shared: merges module linkage into Artifactory build info (Free tier)
 │   └── push-backends/
 │       └── artifactory.sh       # Pluggable push backend for REGISTRY_KIND=artifactory
 ├── images/
@@ -276,12 +287,6 @@ Three variables control this — all set in `global.env` or as CI variables:
 See "Multi-Upstream Mirrors" below if your registry serves each upstream from a
 different subdomain instead of a different path.
 
-**`BUILDER_IMAGE`** — The Alpine image used internally for cert building.
-Defaults to `${DOCKERHUB_MIRROR}/library/alpine:3.21`, which resolves to
-`${PULL_REGISTRY}/docker-hub/library/alpine:3.21` on path-routed setups and
-to `dockerhub.artifactory.example.com/library/alpine:3.21` (or similar) on
-subdomain-routed setups — no override needed for either model.
-
 **`APK_MIRROR`** — Alpine package mirror base URL. Replaces
 `dl-cdn.alpinelinux.org/alpine` in `/etc/apk/repositories` so `apk` fetches
 packages through your proxy. Version paths (`v3.21/main`, `v3.21/community`)
@@ -289,7 +294,6 @@ are preserved automatically.
 
 ```bash
 # global.env — example for Nexus
-BUILDER_IMAGE="${BUILDER_IMAGE:-${DOCKERHUB_MIRROR}/library/alpine:3.21}"
 APK_MIRROR="${APK_MIRROR:-https://nexus.example.com/repository/alpine-proxy}"
 ```
 
@@ -300,13 +304,13 @@ common second-hop upstreams for things like `trivy`, `cosign`, and
 `kube-state-metrics`. There are two ways to route them:
 
 **Path-routed proxy (Harbor, Nexus, JCR Free/Pro path mode)** — one hostname
-fronts every upstream via different path prefixes. `image.env` references the
-`PULL_REGISTRY` hostname plus the proxy-path prefix:
+fronts every upstream via different path prefixes:
 
 ```bash
-SOURCE="${PULL_REGISTRY}/docker-hub/library/nginx"
-SOURCE="${PULL_REGISTRY}/ghcr-proxy/owner/tool"
-SOURCE="${PULL_REGISTRY}/quay-proxy/aquasec/trivy"
+# images/<name>/image.env
+UPSTREAM_REGISTRY="${PULL_REGISTRY}/docker-hub/library"
+UPSTREAM_REGISTRY="${PULL_REGISTRY}/ghcr-proxy/owner"
+UPSTREAM_REGISTRY="${PULL_REGISTRY}/quay-proxy/aquasec"
 ```
 
 **Subdomain-routed proxy (Artifactory Pro subdomain mode, or an nginx sidecar
@@ -321,10 +325,10 @@ QUAY_MIRROR="${QUAY_MIRROR:-quay.artifactory.example.com}"
 ```
 
 ```bash
-# images/<name>/image.env — pick the right var per upstream
-SOURCE="${DOCKERHUB_MIRROR}/library/nginx"
-SOURCE="${GHCR_MIRROR}/owner/tool"
-SOURCE="${QUAY_MIRROR}/aquasec/trivy"
+# images/<name>/image.env — pick the right mirror per upstream
+UPSTREAM_REGISTRY="${DOCKERHUB_MIRROR}/library"
+UPSTREAM_REGISTRY="${GHCR_MIRROR}/owner"
+UPSTREAM_REGISTRY="${QUAY_MIRROR}/aquasec"
 ```
 
 The named vars default to `${PULL_REGISTRY}/docker-hub`, `${PULL_REGISTRY}/ghcr-proxy`,
@@ -595,38 +599,40 @@ the manifest with `team`, `environment`, `build.name`, `build.number`,
 `git.commit`, plus the props above. Other layouts push to the URL/repo
 their templates resolve to — see "Switching layouts" above.
 
-**Pro vs Free (JCR).** The backend uses only APIs available on JCR
-Free. Property-based queries give the same traceability story that
-Pro's module-linkage build-info provides — a `jf rt search` by
-`build.name` / `build.number` / `git.commit` finds exactly the same
-images. If you're on Pro and want Pro's layer-level module linkage in
-the build info, run `jf rt bdc "${BUILD_NAME}" "${BUILD_NUMBER}"`
-yourself after the push — the backend skips it by default because
-the underlying repo-detail API call is Pro-only and would break the
-Free path.
+**Pro vs Free (JCR).** The backend supports both tiers with a single
+codebase. Set `ARTIFACTORY_PRO=true` to unlock Pro features:
+
+| Feature | Free (default) | Pro (`ARTIFACTORY_PRO=true`) |
+|---|---|---|
+| Docker push | `docker push` | `jf docker push` (automatic module linkage) |
+| Build info | Manual JSON assembly with module linkage via storage API | `jf rt bp` with `--project` (project-scoped) |
+| Env vars | Captured via `jf rt bp --collect-env` + include-first filter | Same |
+| Git context | Captured via `jf rt bp --collect-git-info` | Same |
+| Layer props | `jf rt set-props` on all files | Automatic via `jf docker push` |
+| Xray scan | Not available | `jf build-scan` |
+
+Both paths produce the same metadata in the Artifactory UI: modules,
+artifacts, dependencies, env vars, VCS info, and layer-level properties.
+The `jf` CLI auto-installs if not on PATH (set `JF_BINARY_URL` or
+`JF_INSTALLER_URL` for air-gapped environments).
 
 ## image.env Reference
 
+Variable names match the container-image-template repo exactly:
+
 ```bash
-# ── Required: used to pull and build the image ────────────────────────
+# ── Required: upstream source ────────────────────────────────────────
 IMAGE_NAME="prometheus"                                   # Repo name in target registry
-TAG="v3.11.0"                                             # Upstream tag to pull
-DISTRO="busybox"                                          # Base distro (alpine|debian|ubuntu|ubi|busybox|scratch)
-SOURCE="${DOCKERHUB_MIRROR}/prom/prometheus"              # Pull path — see "Multi-Upstream Mirrors" below
-
-# ── Optional: registry destination ───────────────────────────────────
-# Override global PUSH_PROJECT for per-tenant or per-team paths.
-# PUSH_PROJECT="myproject"    # → ${PUSH_REGISTRY}/myproject/prometheus
-
-# ── Optional: custom labels ──────────────────────────────────────────
-# Create images/<name>/labels.env with one key=value per line.
-# Upstream labels are inherited as-is — we never overwrite them.
+UPSTREAM_REGISTRY="${DOCKERHUB_MIRROR}/prom"              # Registry + path prefix
+UPSTREAM_IMAGE="prometheus"                               # Image name under the registry
+# renovate: datasource=docker depName=prom/prometheus
+UPSTREAM_TAG="v3.11.0"                                    # Upstream tag to pin
+DISTRO="busybox"                                          # Base distro (alpine|debian|ubuntu|ubi|busybox)
 
 # ── Optional: image enrichment ────────────────────────────────────────
-REMEDIATE="false"             # true = run images/<name>/remediate.sh for CVE patches
+REMEDIATE="false"             # true = run scripts/remediate/${DISTRO}.sh for CVE patches
 INJECT_CERTS="false"          # true = inject CA certs into trust store
-ORIGINAL_USER="nobody"        # Upstream USER (required when REMEDIATE or INJECT_CERTS=true)
-CUSTOM_DOCKERFILE="false"     # true = use images/<name>/Dockerfile instead of shared
+ORIGINAL_USER="nobody"        # Upstream USER (check: docker inspect <img> --format='{{.Config.User}}')
 ```
 
 ## Tag Format
@@ -663,11 +669,16 @@ promotion provenance labels:
 | Label | Source | Purpose |
 |-------|--------|---------|
 | `org.opencontainers.image.vendor` | build | Organisation that promoted the image |
+| `org.opencontainers.image.authors` | build | Team / contact (default: `Platform Engineering`) |
 | `org.opencontainers.image.created` | build | Promotion build timestamp (ISO 8601) |
 | `org.opencontainers.image.revision` | build | Git commit SHA of the promotion repo |
-| `org.opencontainers.image.ref.name` | build | Promoted tag (`<tag>-<commit>`) |
-| `org.opencontainers.image.base.name` | build | Actual SOURCE:TAG that was pulled |
+| `org.opencontainers.image.version` | build | Promoted tag (`<tag>-<commit>`) |
+| `org.opencontainers.image.ref.name` | build | Same as version |
+| `org.opencontainers.image.base.name` | build | Upstream registry/image:tag that was pulled |
+| `org.opencontainers.image.base.digest` | build | Upstream manifest digest (if crane available) |
+| `org.opencontainers.image.source` | build | Git remote URL |
+| `org.opencontainers.image.url` | build | Same as source |
 | `promoted.from` | build | Same as base.name — the pull origin |
-| `promoted.tag` | build | Same as ref.name — the promoted tag |
+| `promoted.tag` | build | Same as version — the promoted tag |
 | *(upstream labels)* | inherited | title, description, licenses, maintainer, etc. |
-| *(custom labels)* | image.env | Optional in-house metadata via `LABELS` |
+| *(custom labels)* | labels.env | Optional per-image metadata |

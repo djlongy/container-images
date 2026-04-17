@@ -15,11 +15,11 @@
 #
 # Expected summary output:
 #   ✓ config validated
-#   ✓ regex manager matched 3 file(s): images/nginx/..., images/prometheus/..., images/sonarqube/...
+#   ✓ regex manager matched 3 file(s): images/nginx/..., images/prometheus/..., images/renovate/...
 #   updates detected:
 #     library/nginx         1.29.8-alpine  →  1.30.0-alpine   (minor)
 #     prom/prometheus       v3.11.2        →  (none)
-#     library/sonarqube     26.4.0...      →  (none)
+#     renovate/renovate     43.127.0       →  (none)
 #
 # Requires: docker (Colima/Docker Desktop). First run pulls ~500MB.
 

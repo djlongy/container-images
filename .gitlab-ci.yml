@@ -20,9 +20,9 @@ include:
   - local: '.ci/renovate.yml'
   - local: '.ci/validate-ci.yml'
   # Per-image pipeline definitions
-  - local: 'images/prometheus/ci.yml'
   - local: 'images/nginx/ci.yml'
-  - local: 'images/sonarqube/ci.yml'
+  - local: 'images/prometheus/ci.yml'
+  - local: 'images/renovate/ci.yml'
 
 stages:
   - .pre

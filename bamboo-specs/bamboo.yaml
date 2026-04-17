@@ -124,18 +124,18 @@ stages:
 
   - Build Sonarqube:
       jobs:
-        - build-sonarqube
+        - build-renovate
   - Scan Sonarqube:
       jobs:
-        - trivy-sonarqube
-        - sbom-sonarqube
+        - trivy-renovate
+        - sbom-renovate
   - Sign Sonarqube:
       jobs:
-        - cosign-sonarqube
+        - cosign-renovate
   - Promote Sonarqube:
       manual: true
       jobs:
-        - promote-prod-sonarqube
+        - promote-prod-renovate
 
 # ── Shared shell snippets ────────────────────────────────────────────
 #
@@ -510,20 +510,20 @@ promote-prod-nginx:
 
 # ── Sonarqube ─────────────────────────────────────────────────────────
 
-build-sonarqube:
+build-renovate:
   tasks:
     - checkout:
         repository: container-images
     - script:
         interpreter: /bin/sh
-        description: Gate + build and push sonarqube
+        description: Gate + build and push renovate
         body: |
           if [ "${bamboo_FORCE_ALL:-false}" != "true" ]; then
             CHANGED=$(git diff --name-only HEAD~1 HEAD \
-              -- images/sonarqube/ global.env.example Dockerfile scripts/ 2>/dev/null || \
-              git diff --name-only HEAD -- images/sonarqube/ global.env.example Dockerfile scripts/)
+              -- images/renovate/ global.env.example Dockerfile scripts/ 2>/dev/null || \
+              git diff --name-only HEAD -- images/renovate/ global.env.example Dockerfile scripts/)
             if [ -z "$CHANGED" ]; then
-              echo "No changes for sonarqube — skipping"
+              echo "No changes for renovate — skipping"
               echo "SKIP=true" > build.env
               exit 0
             fi
@@ -570,7 +570,7 @@ build-sonarqube:
             fi
           fi
 
-          ./scripts/build.sh sonarqube --push
+          ./scripts/build.sh renovate --push
   artifacts:
     - name: build-env
       location: .
@@ -579,7 +579,7 @@ build-sonarqube:
   requirements:
     - system.docker.executable
 
-trivy-sonarqube:
+trivy-renovate:
   tasks:
     - artifact-download:
         artifacts:
@@ -590,7 +590,7 @@ trivy-sonarqube:
         description: Trivy vulnerability scan
         body: |
           . ./build.env
-          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          [ "${SKIP:-false}" = "true" ] && { echo "renovate: skipped upstream"; exit 0; }
           trivy image --exit-code 0 \
             --severity CRITICAL,HIGH \
             --format json --output trivy-report.json \
@@ -604,7 +604,7 @@ trivy-sonarqube:
   requirements:
     - system.docker.executable
 
-sbom-sonarqube:
+sbom-renovate:
   tasks:
     - artifact-download:
         artifacts:
@@ -615,7 +615,7 @@ sbom-sonarqube:
         description: Syft SBOM generation
         body: |
           . ./build.env
-          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          [ "${SKIP:-false}" = "true" ] && { echo "renovate: skipped upstream"; exit 0; }
           syft "${SYFT_IMAGE}" -o cyclonedx-json=sbom.cdx.json
           echo "SBOM generated: $(grep -c '"name"' sbom.cdx.json) components"
   artifacts:
@@ -626,7 +626,7 @@ sbom-sonarqube:
   requirements:
     - system.docker.executable
 
-cosign-sonarqube:
+cosign-renovate:
   tasks:
     - artifact-download:
         artifacts:
@@ -641,7 +641,7 @@ cosign-sonarqube:
         description: Cosign sign + attestations
         body: |
           . ./build.env
-          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          [ "${SKIP:-false}" = "true" ] && { echo "renovate: skipped upstream"; exit 0; }
           TLOG_FLAG="--tlog-upload=false"
 
           cosign sign --key "${COSIGN_KEY}" --yes ${TLOG_FLAG} \
@@ -661,7 +661,7 @@ cosign-sonarqube:
   requirements:
     - system.docker.executable
 
-promote-prod-sonarqube:
+promote-prod-renovate:
   tasks:
     - artifact-download:
         artifacts:
@@ -669,13 +669,13 @@ promote-prod-sonarqube:
             destination: .
     - script:
         interpreter: /bin/sh
-        description: Promote sonarqube to production registry
+        description: Promote renovate to production registry
         body: |
           . ./build.env
-          [ "${SKIP:-false}" = "true" ] && { echo "sonarqube: skipped upstream"; exit 0; }
+          [ "${SKIP:-false}" = "true" ] && { echo "renovate: skipped upstream"; exit 0; }
           curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
           SRC="${IMAGE_DIGEST}"
-          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/sonarqube:${BUILDKIT_TAG}"
+          DST="${bamboo_PROD_PUSH_REGISTRY}/${bamboo_PROD_PUSH_PROJECT:-base-images}/renovate:${BUILDKIT_TAG}"
           ./crane auth login "${bamboo_PUSH_REGISTRY}" -u "${bamboo_PUSH_REGISTRY_USER}" -p "${bamboo_PUSH_REGISTRY_PASSWORD}"
           ./crane auth login "${bamboo_PROD_PUSH_REGISTRY}" -u "${bamboo_PROD_PUSH_REGISTRY_USER}" -p "${bamboo_PROD_PUSH_REGISTRY_PASSWORD}"
           ./crane copy "${SRC}" "${DST}"

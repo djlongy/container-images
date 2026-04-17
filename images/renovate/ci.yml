@@ -2,14 +2,14 @@
 # To change pipeline structure for ALL images, edit the template then run:
 #   ./scripts/add-image.sh --regenerate
 
-build-sonarqube:
+build-renovate:
   extends: .promote-build
   variables:
-    IMAGE_DIR: sonarqube
+    IMAGE_DIR: renovate
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**
@@ -17,13 +17,13 @@ build-sonarqube:
         - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
-trivy-image-sonarqube:
+trivy-image-renovate:
   extends: .promote-scan
-  needs: [{ job: build-sonarqube, artifacts: true }]
+  needs: [{ job: build-renovate, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**
@@ -31,13 +31,13 @@ trivy-image-sonarqube:
         - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
-syft-sbom-sonarqube:
+syft-sbom-renovate:
   extends: .promote-sbom
-  needs: [{ job: build-sonarqube, artifacts: true }]
+  needs: [{ job: build-renovate, artifacts: true }]
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**
@@ -45,16 +45,16 @@ syft-sbom-sonarqube:
         - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
-cosign-sign-sonarqube:
+cosign-sign-renovate:
   extends: .promote-sign
   needs:
-    - { job: build-sonarqube, artifacts: true }
-    - { job: trivy-image-sonarqube, artifacts: true }
-    - { job: syft-sbom-sonarqube, artifacts: true, optional: true }
+    - { job: build-renovate, artifacts: true }
+    - { job: trivy-image-renovate, artifacts: true }
+    - { job: syft-sbom-renovate, artifacts: true, optional: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**
@@ -62,15 +62,15 @@ cosign-sign-sonarqube:
         - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
-vigil-notify-sonarqube:
+vigil-notify-renovate:
   extends: .promote-notify
   needs:
-    - { job: cosign-sign-sonarqube, optional: true }
-    - { job: build-sonarqube, optional: true, artifacts: true }
+    - { job: cosign-sign-renovate, optional: true }
+    - { job: build-renovate, optional: true, artifacts: true }
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**
@@ -78,19 +78,19 @@ vigil-notify-sonarqube:
         - .ci/image-ci.yml.template
     - if: '$FORCE_ALL == "true"'
 
-promote-prod-sonarqube:
+promote-prod-renovate:
   extends: .promote-prod
   variables:
-    IMAGE_DIR: sonarqube
+    IMAGE_DIR: renovate
   needs:
-    - { job: build-sonarqube, artifacts: true }
-    - { job: vigil-notify-sonarqube, optional: true }
+    - { job: build-renovate, artifacts: true }
+    - { job: vigil-notify-renovate, optional: true }
   rules:
     - if: '$ENABLE_PROD_PROMOTE != "true"'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
-        - images/sonarqube/**
+        - images/renovate/**
         - global.env.example
         - Dockerfile
         - scripts/**

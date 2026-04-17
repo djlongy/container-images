@@ -2,27 +2,27 @@
 # Agnostic container image build script
 #
 # Reads global.env + images/<name>/image.env and builds the promoted image
-# locally using Docker. Can optionally push to Harbor.
+# locally using Docker. Can optionally push to a registry.
 #
 # Usage:
 #   ./scripts/build.sh <image-name> [--push]
 #
 # Examples:
 #   ./scripts/build.sh prometheus          # Build locally
-#   ./scripts/build.sh prometheus --push   # Build and push to Harbor
+#   ./scripts/build.sh prometheus --push   # Build and push
 #   ./scripts/build.sh --list              # List available images
+#
+# Variable naming matches the container-image-template repo:
+#   UPSTREAM_REGISTRY, UPSTREAM_IMAGE, UPSTREAM_TAG — upstream source
+#   In image.env files these replace the legacy SOURCE/TAG variables.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
-# Resolve which global env file to source. global.env is gitignored so
-# local homelab defaults stay out of the repo; global.env.example is the
-# versioned template. On first clone, copy the template:
-#   cp global.env.example global.env
-# and edit for your environment. CI systems can either cp in the job or
-# set all variables as pipeline variables and skip the file.
+# ── Helpers ──────────────────────────────────────────────────────────
+
 resolve_global_env() {
   if [ -f "${REPO_ROOT}/global.env" ]; then
     printf '%s' "${REPO_ROOT}/global.env"
@@ -34,56 +34,6 @@ resolve_global_env() {
   fi
 }
 
-# Emit a build.env dotenv file at REPO_ROOT/build.env capturing the
-# digest-pinned reference for downstream CI jobs (cosign, trivy, syft,
-# crane). CI jobs that source this file get:
-#
-#   IMAGE_NAME    — registry + repo path, no tag  (harbor.example.com/base-images/nginx)
-#   BUILDKIT_TAG  — just the tag                  (1.27.5-alpine-a1b2c3d)
-#   IMAGE_DIGEST  — name@sha256:... if a digest was captured, else name:tag
-#   TRIVY_IMAGE   — same as IMAGE_DIGEST (trivy accepts both forms)
-#   SYFT_IMAGE    — same as IMAGE_DIGEST
-#
-# Cosign wants digest references specifically because it signs by
-# content hash, not tag. Tag-references make attestation discovery
-# fragile because a tag can be overwritten. The digest we capture
-# here is the one the registry reported at push time, so it matches
-# exactly what got written server-side.
-emit_build_env() {
-  local full_image="$1"   # registry/project/name:tag
-  local digest="$2"       # sha256:... (may be empty)
-  local tag="${full_image##*:}"
-  local name="${full_image%:*}"
-  local image_digest="${full_image}"
-  [ -n "${digest}" ] && image_digest="${name}@${digest}"
-  cat > "${REPO_ROOT}/build.env" <<BUILDENV
-IMAGE_NAME=${name}
-BUILDKIT_TAG=${tag}
-IMAGE_DIGEST=${image_digest}
-TRIVY_IMAGE=${image_digest}
-SYFT_IMAGE=${image_digest}
-BUILDENV
-  echo "  build.env:    ${REPO_ROOT}/build.env"
-}
-
-# Extract the sha256 manifest digest from a `docker push` captured
-# stdout/stderr. The registry echoes a line like
-#   <tag>: digest: sha256:<64-hex> size: <n>
-# on every successful push, whether layers were newly uploaded or
-# "Layer already exists". Returns empty if no digest was found
-# (e.g. the push actually failed — caller should have already
-# checked exit code before getting here).
-extract_push_digest() {
-  printf '%s' "$1" | grep -oE 'sha256:[0-9a-f]{64}' | head -1
-}
-
-# Resolve which per-image env file to source. Same pattern as global:
-# images/<name>/image.env is gitignored (local overrides), *.example is
-# the versioned template. Fresh clones and CI pick up the example with
-# no bootstrap step; local users run
-#   cp images/<name>/image.env.example images/<name>/image.env
-# to pin a different TAG, flip a flag, etc. without touching the repo.
-# $1 = absolute directory path for the image (images/<name>/)
 resolve_image_env() {
   local dir="$1"
   if [ -f "${dir}/image.env" ]; then
@@ -95,7 +45,34 @@ resolve_image_env() {
   fi
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────
+emit_build_env() {
+  local full_image="$1" digest="$2"
+  local tag="${full_image##*:}"
+  local name="${full_image%:*}"
+  local image_digest="${full_image}"
+  [ -n "${digest}" ] && image_digest="${name}@${digest}"
+  cat > "${REPO_ROOT}/build.env" <<BUILDENV
+IMAGE_REF=${full_image}
+IMAGE_NAME=${name}
+IMAGE_TAG=${tag}
+IMAGE_DIGEST=${image_digest}
+UPSTREAM_TAG=${UPSTREAM_TAG}
+UPSTREAM_REF=${UPSTREAM_REF}
+BASE_DIGEST=${BASE_DIGEST:-}
+GIT_SHA=${GIT_SHA}
+CREATED=${BUILD_DATE}
+BUILDENV
+  echo "  build.env:    ${REPO_ROOT}/build.env"
+}
+
+extract_push_digest() {
+  local digest
+  digest=$(printf '%s' "$1" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)
+  if [ -z "${digest}" ]; then
+    digest=$(printf '%s' "$1" | awk '/digest: sha256:/{print $3}' | head -1)
+  fi
+  printf '%s' "${digest}"
+}
 
 usage() {
   cat <<EOF
@@ -105,7 +82,7 @@ Usage: $(basename "$0") <image-name> [--push]
 Builds a promoted container image from images/<name>/.
 
 Options:
-  --push    Push the built image to Harbor after building
+  --push    Push the built image after building
   --list    List all available images
   --help    Show this help message
 EOF
@@ -113,9 +90,6 @@ EOF
 }
 
 list_images() {
-  # Source global.env ONCE so ${PULL_REGISTRY} (referenced by SOURCE
-  # in each image.env) expands. Each per-image source runs in a subshell
-  # so variables from one image.env don't leak into the next iteration.
   # shellcheck source=/dev/null
   source "$(resolve_global_env)"
   echo "Available images:"
@@ -128,13 +102,13 @@ list_images() {
       flags=""
       [ "${REMEDIATE:-false}"    = "true" ] && flags="${flags} [+remediate:${DISTRO:-?}]"
       [ "${INJECT_CERTS:-false}" = "true" ] && flags="${flags} [+certs]"
-      printf "  %-20s %s%s\n" "${name}" "${SOURCE}:${TAG}" "${flags}"
+      printf "  %-20s %s/%s:%s%s\n" "${name}" "${UPSTREAM_REGISTRY}" "${UPSTREAM_IMAGE}" "${UPSTREAM_TAG}" "${flags}"
     )
   done
   exit 0
 }
 
-# ── Argument parsing ──────────────────────────────────────────────────
+# ── Argument parsing ─────────────────────────────────────────────────
 
 [ $# -eq 0 ] && usage 1
 
@@ -153,7 +127,7 @@ done
 
 [ -z "${IMAGE}" ] && { echo "ERROR: Image name required" >&2; usage 1; }
 
-# ── Load configuration ───────────────────────────────────────────────
+# ── Load configuration ──────────────────────────────────────────────
 
 IMAGE_DIR="${REPO_ROOT}/images/${IMAGE}"
 
@@ -165,8 +139,6 @@ fi
 
 IMAGE_ENV_FILE="$(resolve_image_env "${IMAGE_DIR}")" || {
   echo "ERROR: Missing image.env and image.env.example in images/${IMAGE}/" >&2
-  echo "  Expected: ${IMAGE_DIR}/image.env (gitignored local override)" >&2
-  echo "         or ${IMAGE_DIR}/image.env.example (versioned template)" >&2
   exit 1
 }
 
@@ -174,18 +146,13 @@ IMAGE_ENV_FILE="$(resolve_image_env "${IMAGE_DIR}")" || {
 #   1. Shell environment (export VAR=… before invoking build.sh, or CI vars)
 #   2. images/<name>/image.env
 #   3. global.env
-#
-# Implementation: snapshot the keys we care about from the shell, source
-# global.env then image.env (so file defaults populate), then re-apply
-# the snapshot so exported shell values overwrite file values. This keeps
-# one source of truth — the shell is always the override when set.
 __SHELL_OVERRIDES=""
 for __v in \
-  PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR \
+  PULL_REGISTRY PUSH_REGISTRY PUSH_PROJECT VENDOR AUTHORS \
   DOCKERHUB_MIRROR GHCR_MIRROR QUAY_MIRROR \
-  BUILDER_IMAGE APK_MIRROR APT_MIRROR \
+  APK_MIRROR APT_MIRROR \
   PROD_PUSH_REGISTRY PROD_PUSH_PROJECT \
-  IMAGE_NAME TAG DISTRO SOURCE \
+  IMAGE_NAME UPSTREAM_REGISTRY UPSTREAM_IMAGE UPSTREAM_TAG DISTRO \
   REMEDIATE INJECT_CERTS ORIGINAL_USER CUSTOM_DOCKERFILE \
   VAULT_KV_MOUNT VAULT_CA_PATH CA_CERT \
   REGISTRY_KIND \
@@ -193,10 +160,9 @@ for __v in \
   ARTIFACTORY_PRO ARTIFACTORY_PROJECT \
   ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
   ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER ARTIFACTORY_PROPERTIES \
+  ARTIFACTORY_SBOM_REPO \
   ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF ARTIFACTORY_MANIFEST_PATH
 do
-  # Only snapshot if the variable is actually set in the shell (not unset).
-  # This distinguishes "user exported it" from "file will set it".
   if [ "${!__v+set}" = "set" ]; then
     __SHELL_OVERRIDES="${__SHELL_OVERRIDES}${__v}=$(printf '%q' "${!__v}")"$'\n'
   fi
@@ -208,7 +174,6 @@ source "$(resolve_global_env)"
 # shellcheck source=/dev/null
 source "${IMAGE_ENV_FILE}"
 
-# Re-apply shell overrides so they win over file values
 if [ -n "${__SHELL_OVERRIDES}" ]; then
   while IFS= read -r __line; do
     [ -z "${__line}" ] && continue
@@ -218,40 +183,51 @@ if [ -n "${__SHELL_OVERRIDES}" ]; then
 fi
 unset __SHELL_OVERRIDES
 
-# ── Derived values ────────────────────────────────────────────────────
+# Required fields
+: "${UPSTREAM_REGISTRY:?UPSTREAM_REGISTRY must be set in image.env}"
+: "${UPSTREAM_IMAGE:?UPSTREAM_IMAGE must be set in image.env}"
+: "${UPSTREAM_TAG:?UPSTREAM_TAG must be set in image.env}"
 
-GIT_SHORT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo "local")"
+# Optional with sane defaults
+IMAGE_NAME="${IMAGE_NAME:-${UPSTREAM_IMAGE}}"
+DISTRO="${DISTRO:-alpine}"
+REMEDIATE="${REMEDIATE:-false}"
+INJECT_CERTS="${INJECT_CERTS:-false}"
+ORIGINAL_USER="${ORIGINAL_USER:-root}"
+VENDOR="${VENDOR:-example.com}"
+
+# ── Derived values ───────────────────────────────────────────────────
+
+GIT_SHORT="$(git -C "${REPO_ROOT}" rev-parse --short=7 HEAD 2>/dev/null || echo "local")"
 GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo "unknown")"
-PROMOTED_TAG="${TAG}-${GIT_SHORT_SHA}"
-FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${PROMOTED_TAG}"
-BASE_IMAGE="${SOURCE}:${TAG}"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+FULL_TAG="${UPSTREAM_TAG}-${GIT_SHORT}"
+UPSTREAM_REF="${UPSTREAM_REGISTRY}/${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
+FULL_IMAGE="${PUSH_REGISTRY}/${PUSH_PROJECT}/${IMAGE_NAME}:${FULL_TAG}"
 
-# Preflight: validate DISTRO + materialise remediate.sh in build context
-#
-# The Dockerfile unconditionally COPYs images/<name>/remediate.sh into
-# the base-remediated stage. Docker/BuildKit evaluates COPY sources for
-# every defined stage at DAG resolution time even when the stage is
-# unreachable from the final target, so remediate.sh MUST exist on disk
-# regardless of REMEDIATE's value. At runtime the final-${REMEDIATE}-*
-# stage selector is what decides whether the script actually runs.
-#
-# Resolution order when REMEDIATE=true:
-#   1. images/<name>/remediate.sh          (per-image override wins)
-#   2. scripts/remediate/${DISTRO}.sh      (shared distro default)
-#   3. Hard error if neither exists.
-#
-# When REMEDIATE=false we still place a no-op script so the COPY
-# succeeds; the stage that would run it is pruned from the final image.
+# Export for downstream (push backends, build.env)
+export UPSTREAM_TAG UPSTREAM_REF GIT_SHA BUILD_DATE
+
+# ── Source / URL labels ──────────────────────────────────────────────
+SOURCE_URL="${CI_PROJECT_URL:-${bamboo_planRepository_1_repositoryUrl:-}}"
+if [ -z "${SOURCE_URL}" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  SOURCE_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+fi
+
+# ── Upstream base digest (optional) ──────────────────────────────────
+BASE_DIGEST=""
+if command -v crane >/dev/null 2>&1; then
+  BASE_DIGEST=$(crane digest "${UPSTREAM_REF}" 2>/dev/null || echo "")
+elif docker buildx imagetools inspect --raw "${UPSTREAM_REF}" >/dev/null 2>&1; then
+  BASE_DIGEST=$(docker buildx imagetools inspect "${UPSTREAM_REF}" --format '{{.Digest}}' 2>/dev/null || echo "")
+fi
+
+# ── Preflight: materialise remediate.sh ──────────────────────────────
 REMEDIATE_CLEANUP=""
-# Note: the trap that cleans up this variable is installed a few lines
-# below (together with CERTS_CLEANUP). Both placeholders get removed on
-# exit via the same trap.
 
-if [ "${REMEDIATE:-false}" = "true" ]; then
-  if [ -z "${DISTRO:-}" ]; then
+if [ "${REMEDIATE}" = "true" ]; then
+  if [ -z "${DISTRO}" ]; then
     echo "ERROR: DISTRO not set in images/${IMAGE}/image.env (required when REMEDIATE=true)" >&2
-    echo "Set DISTRO to one of: alpine, debian, ubuntu, ubi" >&2
     exit 1
   fi
   if [ -f "${IMAGE_DIR}/remediate.sh" ]; then
@@ -261,17 +237,12 @@ if [ "${REMEDIATE:-false}" = "true" ]; then
     REMEDIATE_CLEANUP="${IMAGE_DIR}/remediate.sh"
     echo "  Remediation:  scripts/remediate/${DISTRO}.sh (distro default)"
   else
-    echo "ERROR: REMEDIATE=true but no remediation script found" >&2
-    echo "  Expected one of:" >&2
-    echo "    ${IMAGE_DIR}/remediate.sh           (per-image override)" >&2
-    echo "    ${REPO_ROOT}/scripts/remediate/${DISTRO}.sh  (distro default)" >&2
+    echo "ERROR: REMEDIATE=true but scripts/remediate/${DISTRO}.sh not found" >&2
+    echo "       Available: $(ls "${REPO_ROOT}/scripts/remediate/" | sed 's/\.sh$//' | tr '\n' ' ')" >&2
     exit 1
   fi
 elif [ ! -f "${IMAGE_DIR}/remediate.sh" ]; then
-  # REMEDIATE=false and no per-image script — drop a no-op so the
-  # Dockerfile COPY succeeds. The base-remediated stage won't run.
-  printf '#!/bin/sh\n# placeholder — REMEDIATE=false, this file is never executed\nexit 0\n' \
-    > "${IMAGE_DIR}/remediate.sh"
+  printf '#!/bin/sh\nexit 0\n' > "${IMAGE_DIR}/remediate.sh"
   REMEDIATE_CLEANUP="${IMAGE_DIR}/remediate.sh"
 fi
 
@@ -282,21 +253,7 @@ else
   DOCKERFILE="${REPO_ROOT}/Dockerfile"
 fi
 
-# Inject CA cert — three sources, checked in order:
-#   1. CA_CERT env var (CI variable or export)
-#   2. HashiCorp Vault (OPT-IN: VAULT_CA_PATH must be set, else skipped)
-#   3. Files already in certs/ (manually dropped, gitignored)
-#
-# Vault is opt-in via VAULT_CA_PATH so the mere presence of the `vault`
-# binary never causes a blocking call. Without VAULT_CA_PATH we skip
-# Vault entirely and rely on CA_CERT env or certs/ on disk.
-#
-# The Dockerfile has an unconditional `COPY certs/*.crt /tmp/custom-ca/`
-# in the base-remediated stage, and BuildKit evaluates it even when
-# INJECT_CERTS=false and the stage is unreachable from the final target.
-# So certs/ must always contain at least one .crt at build time. When
-# injection is disabled we drop a no-op placeholder and clean it up on
-# exit via the existing trap, mirroring the remediate.sh pattern.
+# ── Cert materialisation ────────────────────────────────────────────
 mkdir -p "${REPO_ROOT}/certs"
 CERTS_CLEANUP=""
 # shellcheck disable=SC2064
@@ -305,59 +262,35 @@ trap '
   [ -n "${CERTS_CLEANUP}" ]     && rm -f "${CERTS_CLEANUP}"
 ' EXIT
 
-if [ "${INJECT_CERTS:-false}" = "true" ]; then
-  if [ -n "${CA_CERT:-}" ]; then
-    echo "${CA_CERT}" > "${REPO_ROOT}/certs/custom-ca.crt"
-    echo "  CA cert:      injected from CA_CERT env var"
-  elif [ -n "${VAULT_CA_PATH:-}" ] && command -v vault >/dev/null 2>&1; then
-    # Vault is opt-in — only attempt the pull when VAULT_CA_PATH is
-    # explicitly set. VAULT_ADDR must already be exported by the caller
-    # (or ~/.vault-token configured) so the CLI has a target; we don't
-    # probe it here to avoid a blocking connect if the user just has the
-    # binary installed but no Vault configured.
-    if vault kv get -mount="${VAULT_KV_MOUNT:-secret}" \
-         -field=certificate "${VAULT_CA_PATH}" \
-         > "${REPO_ROOT}/certs/custom-ca.crt" 2>/dev/null; then
-      echo "  CA cert:      pulled from Vault (${VAULT_KV_MOUNT:-secret}/${VAULT_CA_PATH})"
-    else
-      echo "  WARN: Vault pull failed — falling back to certs/ on disk"
-      rm -f "${REPO_ROOT}/certs/custom-ca.crt"
-    fi
-  fi
-  # Check we have at least one cert to inject
-  if ls "${REPO_ROOT}"/certs/*.crt >/dev/null 2>&1; then
-    echo "  Certs found:  $(ls "${REPO_ROOT}"/certs/*.crt | wc -l | tr -d ' ') file(s)"
+if [ -n "${CA_CERT:-}" ]; then
+  echo "${CA_CERT}" > "${REPO_ROOT}/certs/ci-injected.crt"
+  echo "  CA cert:      injected from CA_CERT env var"
+  INJECT_CERTS=true
+elif [ -n "${VAULT_CA_PATH:-}" ] && command -v vault >/dev/null 2>&1; then
+  if vault kv get -mount="${VAULT_KV_MOUNT:-secret}" \
+       -field=certificate "${VAULT_CA_PATH}" \
+       > "${REPO_ROOT}/certs/vault-ca.crt" 2>/dev/null; then
+    echo "  CA cert:      pulled from Vault (${VAULT_KV_MOUNT:-secret}/${VAULT_CA_PATH})"
+    INJECT_CERTS=true
   else
-    echo "  ERROR: INJECT_CERTS=true but no .crt files in certs/"
-    echo "  Set CA_CERT env var, configure Vault, or drop certs into certs/"
-    exit 1
-  fi
-else
-  # INJECT_CERTS=false — if certs/ is empty, generate a valid throwaway
-  # self-signed cert so the Dockerfile's unconditional COPY certs/*.crt
-  # doesn't fail. The base-certs-only / base-remediated-certs stages
-  # that would touch it are pruned from the final image anyway, but
-  # BuildKit still evaluates them, and update-ca-certificates in the
-  # cert-merge stage will reject an invalid blob.
-  if ! ls "${REPO_ROOT}"/certs/*.crt >/dev/null 2>&1; then
-    PLACEHOLDER="${REPO_ROOT}/certs/placeholder.crt"
-    if command -v openssl >/dev/null 2>&1; then
-      openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-        -keyout /dev/null \
-        -subj "/CN=container-images build placeholder/O=noop" \
-        -out "${PLACEHOLDER}" 2>/dev/null
-      CERTS_CLEANUP="${PLACEHOLDER}"
-    else
-      echo "ERROR: INJECT_CERTS=false and certs/ is empty, but openssl is" >&2
-      echo "not available to generate a placeholder. Install openssl or drop" >&2
-      echo "any valid .crt into certs/ to unblock the build." >&2
-      exit 1
-    fi
+    echo "  WARN: Vault pull failed — falling back to certs/ on disk" >&2
+    rm -f "${REPO_ROOT}/certs/vault-ca.crt"
   fi
 fi
 
-# ── Build ─────────────────────────────────────────────────────────────
+if [ "${INJECT_CERTS}" = "true" ]; then
+  if ! ls "${REPO_ROOT}"/certs/*.crt >/dev/null 2>&1 && \
+     ! ls "${REPO_ROOT}"/certs/*.pem >/dev/null 2>&1; then
+    echo "ERROR: INJECT_CERTS=true but no .crt/.pem files in certs/" >&2
+    exit 1
+  fi
+  echo "  Certs found:  $(ls "${REPO_ROOT}"/certs/*.crt "${REPO_ROOT}"/certs/*.pem 2>/dev/null | wc -l | tr -d ' ') file(s)"
+fi
 
+# Ensure certs/ has at least a .gitkeep so COPY certs/ doesn't fail
+: > "${REPO_ROOT}/certs/.gitkeep"
+
+# ── Build ────────────────────────────────────────────────────────────
 # Build custom label flags from labels.env file (one key=value per line)
 LABEL_FLAGS=""
 LABELS_FILE="${IMAGE_DIR}/labels.env"
@@ -370,29 +303,58 @@ if [ -f "${LABELS_FILE}" ]; then
   echo "  Custom labels: ${LABELS_FILE}"
 fi
 
-echo "=== Building ${IMAGE_NAME} ==="
-echo "  Source:       ${BASE_IMAGE}"
-echo "  Destination:  ${FULL_IMAGE}"
-echo "  Dockerfile:   ${DOCKERFILE#${REPO_ROOT}/}"
-echo "  Remediate:    ${REMEDIATE:-false}"
-echo "  Inject certs: ${INJECT_CERTS:-false}"
 echo ""
+echo "=========================================="
+echo "  container-images build"
+echo "=========================================="
+echo "  Image:              ${FULL_IMAGE}"
+echo "  Upstream:           ${UPSTREAM_REF}"
+echo "  Upstream digest:    ${BASE_DIGEST:-<not resolved>}"
+echo "  Git commit:         ${GIT_SHORT} (${GIT_SHA})"
+echo "  Created (UTC):      ${BUILD_DATE}"
+echo "  Distro:             ${DISTRO}"
+echo "  Remediate:          ${REMEDIATE}$([ "${REMEDIATE}" = "true" ] && echo " (${DISTRO})" || echo "")"
+echo "  Inject certs:       ${INJECT_CERTS}"
+echo "  Original user:      ${ORIGINAL_USER}"
+echo "  Vendor:             ${VENDOR}"
+echo "=========================================="
+echo ""
+
+BUILD_ARGS=(
+  --build-arg "UPSTREAM_REGISTRY=${UPSTREAM_REGISTRY}"
+  --build-arg "UPSTREAM_IMAGE=${UPSTREAM_IMAGE}"
+  --build-arg "UPSTREAM_TAG=${UPSTREAM_TAG}"
+  --build-arg "INJECT_CERTS=${INJECT_CERTS}"
+  --build-arg "REMEDIATE=${REMEDIATE}"
+  --build-arg "ORIGINAL_USER=${ORIGINAL_USER}"
+  --build-arg "IMAGE_DIR=${IMAGE}"
+  --build-arg "APK_MIRROR=${APK_MIRROR:-}"
+  --build-arg "APT_MIRROR=${APT_MIRROR:-}"
+)
+
+LABEL_ARGS=(
+  --label "org.opencontainers.image.vendor=${VENDOR}"
+  --label "org.opencontainers.image.authors=${AUTHORS:-Platform Engineering}"
+  --label "org.opencontainers.image.created=${BUILD_DATE}"
+  --label "org.opencontainers.image.revision=${GIT_SHA}"
+  --label "org.opencontainers.image.version=${FULL_TAG}"
+  --label "org.opencontainers.image.ref.name=${FULL_TAG}"
+  --label "org.opencontainers.image.base.name=${UPSTREAM_REF}"
+  --label "promoted.from=${UPSTREAM_REF}"
+  --label "promoted.tag=${FULL_TAG}"
+)
+if [ -n "${BASE_DIGEST}" ]; then
+  LABEL_ARGS+=(--label "org.opencontainers.image.base.digest=${BASE_DIGEST}")
+fi
+if [ -n "${SOURCE_URL:-}" ]; then
+  LABEL_ARGS+=(--label "org.opencontainers.image.source=${SOURCE_URL}")
+  LABEL_ARGS+=(--label "org.opencontainers.image.url=${SOURCE_URL}")
+fi
 
 # shellcheck disable=SC2086
 docker build \
-  --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-  --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE:-alpine:3.21}" \
-  --build-arg "APK_MIRROR=${APK_MIRROR:-}" \
-  --build-arg "APT_MIRROR=${APT_MIRROR:-}" \
-  --build-arg "TAG=${TAG}" \
-  --build-arg "APP_VERSION=${PROMOTED_TAG}" \
-  --build-arg "VENDOR=${VENDOR:-}" \
-  --build-arg "VCS_REF=${GIT_SHA}" \
-  --build-arg "BUILD_DATE=${BUILD_DATE}" \
-  --build-arg "REMEDIATE=${REMEDIATE:-false}" \
-  --build-arg "IMAGE_DIR=${IMAGE}" \
-  --build-arg "INJECT_CERTS=${INJECT_CERTS:-false}" \
-  --build-arg "ORIGINAL_USER=${ORIGINAL_USER:-root}" \
+  "${BUILD_ARGS[@]}" \
+  "${LABEL_ARGS[@]}" \
   ${LABEL_FLAGS} \
   -t "${FULL_IMAGE}" \
   -f "${DOCKERFILE}" \
@@ -401,37 +363,22 @@ docker build \
 echo ""
 echo "Built: ${FULL_IMAGE}"
 
-# Show labels for verification
 echo ""
 echo "=== OCI Labels ==="
 docker inspect "${FULL_IMAGE}" --format='{{json .Config.Labels}}' | python3 -m json.tool 2>/dev/null || \
   docker inspect "${FULL_IMAGE}" --format='{{json .Config.Labels}}'
 
 # ── Push (optional) ──────────────────────────────────────────────────
-#
-# Default (REGISTRY_KIND unset) = plain `docker push` to the baseline
-# push target built into FULL_IMAGE — the Harbor flow everyone's been
-# using. Opt-in to registry-specific enrichment (build info, metadata
-# properties, team routing) by setting REGISTRY_KIND to a supported
-# backend. Backends live in scripts/push-backends/<kind>.sh and must
-# expose a push_to_backend() function that takes the locally-built
-# image tag as its single argument.
 
 if [ "${PUSH}" = "true" ]; then
   if [ -n "${REGISTRY_KIND:-}" ]; then
     BACKEND_SCRIPT="${REPO_ROOT}/scripts/push-backends/${REGISTRY_KIND}.sh"
     if [ ! -f "${BACKEND_SCRIPT}" ]; then
       echo "ERROR: unknown REGISTRY_KIND='${REGISTRY_KIND}'" >&2
-      echo "  Expected: ${BACKEND_SCRIPT}" >&2
-      echo "  Available: $(ls "${REPO_ROOT}/scripts/push-backends/"*.sh 2>/dev/null | xargs -n1 basename | sed 's/\.sh$//' | tr '\n' ' ')" >&2
       exit 1
     fi
     # shellcheck source=/dev/null
     source "${BACKEND_SCRIPT}"
-    if ! command -v push_to_backend >/dev/null 2>&1; then
-      echo "ERROR: ${BACKEND_SCRIPT} does not define push_to_backend()" >&2
-      exit 1
-    fi
     push_to_backend "${FULL_IMAGE}"
   else
     echo ""

@@ -43,11 +43,6 @@
       "semanticCommitScope": "images"
     },
     {
-      "description": "SonarQube Community only — ignore developer/enterprise/datacenter editions.",
-      "matchDepNames": ["library/sonarqube"],
-      "allowedVersions": "/community$/"
-    },
-    {
       "description": "nginx — pin to the alpine variant we build on.",
       "matchDepNames": ["library/nginx"],
       "allowedVersions": "/alpine$/"

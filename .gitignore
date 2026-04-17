@@ -16,9 +16,17 @@ certs/*.key
 certs/*.csr
 !certs/.gitkeep
 
+# Vault / credentials — never committed
+.vault-token
+credentials*.env
+
 # Agent / editor runtime state
 .claude/
+.playwright-mcp/
 build.env
+
+# SonarQube scanner output
+.scannerwork/
 
 # Local workspace — test runners, credential exports, scratch
 # playbooks, and any other files that reference real hostnames,
