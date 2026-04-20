@@ -374,6 +374,77 @@ For CI jobs, the same bootstrap uses the `CA_CERT` CI variable:
 - if [ -n "${CA_CERT}" ]; then echo "${CA_CERT}" >> /etc/ssl/certs/ca-certificates.crt; fi
 ```
 
+#### CA Cert Retrieval Without curl or wget
+
+Some minimal/scratch-based images ship `curl` linked against GnuTLS
+(common on Ubuntu/Debian). GnuTLS has stricter entropy seeding
+requirements than OpenSSL and will fail inside short-lived containers
+with `curl: (35) Insufficient randomness` — even when `/dev/urandom`
+exists. This is a GnuTLS-specific TLS handshake failure, not a network
+or CA trust issue.
+
+If `curl` is broken and `wget` is not installed, two alternatives
+extract the root CA cert using tools that are almost always present:
+
+**Option 1 — `openssl s_client` (preferred)**
+
+Connects to the TLS endpoint and extracts the root CA directly from
+the certificate chain. Uses OpenSSL's own crypto stack, not GnuTLS.
+No file download needed — the cert comes from the live handshake:
+
+```bash
+# Extract the root CA (last cert in the chain) from the TLS handshake
+openssl s_client -connect artifactory.example.com:443 -showcerts \
+    </dev/null 2>/dev/null \
+  | awk '
+      BEGIN {n=0}
+      /BEGIN CERTIFICATE/ {n++; cert=""}
+      {cert = cert $0 "\n"}
+      /END CERTIFICATE/   {last=cert}
+      END {printf "%s", last}
+    ' \
+  > /usr/local/share/ca-certificates/internal-ca.crt
+
+update-ca-certificates
+```
+
+After this, `curl`, `apt`, `apk`, and any other TLS client trusts the
+internal CA. Use this in a Dockerfile `RUN` step before any package
+install or tool download.
+
+**Option 2 — multi-stage builder**
+
+Avoid running any network command inside the target image. Use an
+Alpine builder stage (where `curl`/`wget`/`openssl` all work) to
+download tools and certs, then `COPY --from=builder` into the final
+image:
+
+```dockerfile
+FROM alpine:3.21 AS builder
+# If the download source needs an internal CA, inject it first
+COPY certs/*.crt /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+RUN apk add --no-cache curl
+RUN curl -sSfL https://example.com/tool -o /tools/tool
+
+FROM ubuntu-based-target:latest
+COPY --from=builder /tools/tool /usr/local/bin/tool
+COPY certs/*.crt /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+```
+
+This sidesteps the GnuTLS entropy issue entirely — `curl` never runs
+inside the target image.
+
+**When to use which:**
+
+| Scenario | Approach |
+|----------|----------|
+| Dockerfile `RUN` — need to `apt`/`apk` install packages | Option 1 (openssl bootstrap before package manager) |
+| Dockerfile — need to download binaries (syft, grype, jf) | Option 2 (multi-stage, download in builder) |
+| Runtime container — one-off cert fetch | Option 1 (openssl, then normal operations) |
+| CI pipeline step — tool install in job script | Option 1 or pass `CA_CERT` as CI variable |
+
 ### Custom Dockerfile Override
 
 For images that need build logic beyond what the shared template provides
