@@ -44,6 +44,13 @@ variables:
   # Alpine APK mirror — replaces dl-cdn.alpinelinux.org/alpine in /etc/apk/repositories.
   # Set to your Artifactory/proxy Alpine remote repo base URL.
   APK_MIRROR: ""
+  # Grype vulnerability DB mirror (air-gap support).
+  # When ARTIFACTORY_GRYPE_DB_REPO is set, the grype-db-sync job (in
+  # .pre stage) mirrors the Anchore CVE DB to that Artifactory repo
+  # before any scan runs. Leave empty to let scanners fetch from
+  # grype.anchore.io directly.
+  ARTIFACTORY_GRYPE_DB_REPO: ""
+  GRYPE_DB_MIRROR_SUBPATH: "grype-db/v6"
 
 # Disable ALL default devsecops jobs — this repo has no application source
 # code to scan. Per-image jobs (build-xxx, trivy-image-xxx, etc.) replace

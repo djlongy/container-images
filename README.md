@@ -143,6 +143,8 @@ All settings come from environment variables or CI/CD pipeline variables.
 | `ARTIFACTORY_PRO` | CI variable | Set to `true` to enable Pro features: `jf docker push`, project-scoped build info, Xray scan |
 | `ARTIFACTORY_PROJECT` | CI variable | Project key for `--project` flag (defaults to `ARTIFACTORY_TEAM`) |
 | `ARTIFACTORY_SBOM_REPO` | CI variable | Xray-indexed generic repo for SBOM upload via `scripts/sbom-post.sh` |
+| `ARTIFACTORY_GRYPE_DB_REPO` | CI variable | Generic repo for Grype CVE DB mirror (air-gap). Triggers `grype-db-sync` job in `.pre` stage. Leave empty to pull from grype.anchore.io directly |
+| `GRYPE_DB_MIRROR_SUBPATH` | CI variable | Path inside the mirror repo (default `grype-db/v6` — matches Anchore's structure so relative hrefs resolve) |
 | `JF_BINARY_URL` | CI variable | Direct URL to `jf` binary for air-gapped auto-install |
 | `JF_INSTALLER_URL` | CI variable | URL to JFrog CLI installer script (default: `https://install.jfrog.io`) |
 | `AUTHORS` | CI variable | `org.opencontainers.image.authors` label (default: `Platform Engineering`) |
@@ -296,6 +298,31 @@ are preserved automatically.
 # global.env — example for Nexus
 APK_MIRROR="${APK_MIRROR:-https://nexus.example.com/repository/alpine-proxy}"
 ```
+
+#### Grype CVE Database Mirror
+
+Grype fetches its vulnerability database (~100 MB) from
+`grype.anchore.io` on every scan. In a fully air-gapped environment,
+mirror it to an Artifactory generic local repo using the shipped
+script:
+
+```bash
+ARTIFACTORY_URL=https://artifactory.example.com \
+  ARTIFACTORY_USER=svc-grype-mirror \
+  ARTIFACTORY_TOKEN=<token> \
+  ARTIFACTORY_GRYPE_DB_REPO=grype-db-local \
+  ./scripts/mirror-grype-db.sh
+```
+
+The script downloads `databases/v6/latest.json` + the referenced
+tarball, verifies the SHA-256 against the listing, and uploads both
+to `<repo>/grype-db/v6/`. Grype resolves the tarball via the
+listing's relative `path` field, so no URL rewriting is needed.
+
+Set `ARTIFACTORY_GRYPE_DB_REPO` as a CI variable to enable the
+pipeline-level `grype-db-sync` job (runs in `.pre` stage, once per
+pipeline) which calls this script automatically. All per-image scan
+jobs then pull from the mirror via `GRYPE_DB_UPDATE_URL`.
 
 #### Multi-Upstream Mirrors
 

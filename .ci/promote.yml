@@ -105,6 +105,28 @@
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - if: '$CI_COMMIT_TAG'
 
+# ── Grype DB mirror (air-gap support, shared across all images) ──────
+#
+# Mirrors the Anchore Grype CVE database to an Artifactory generic repo
+# so grype can scan without reaching grype.anchore.io. All per-image
+# grype scans pull from the same mirror, so this job runs ONCE per
+# pipeline (not per-image) in the .pre stage before any scan.
+#
+# Skipped when ARTIFACTORY_GRYPE_DB_REPO is unset — in that case grype
+# falls back to its default (public CDN), which is still the right
+# behavior on networks with direct internet egress.
+grype-db-sync:
+  stage: .pre
+  image: ${ALPINE_IMAGE:-alpine:3.21}
+  rules:
+    - if: '$ARTIFACTORY_GRYPE_DB_REPO != "" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$ARTIFACTORY_GRYPE_DB_REPO != "" && $CI_PIPELINE_SOURCE == "schedule"'
+    - when: never
+  before_script:
+    - apk add --no-cache bash curl python3 coreutils >/dev/null
+  script:
+    - ./scripts/mirror-grype-db.sh
+
 # ── Sign ──────────────────────────────────────────────────────────────
 
 .promote-sign:
