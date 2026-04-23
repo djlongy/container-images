@@ -524,7 +524,7 @@ Optional:
 | `ARTIFACTORY_IMAGE_REF` | Layout A fallback | Shell-template for the docker push URL. See "Switching layouts" below. |
 | `ARTIFACTORY_MANIFEST_PATH` | Layout A fallback | Shell-template for the REST storage path used by `jf rt set-props`. |
 | `ARTIFACTORY_ENVIRONMENT` | `dev` | Exposed to templates as `${ARTIFACTORY_ENVIRONMENT}`; derived `${ARTIFACTORY_REPO_SUFFIX}` maps `dev`→`local`, `prod`→`prod`. Layouts that don't split dev/prod simply don't reference either var. |
-| `ARTIFACTORY_BUILD_NAME` | `${IMAGE_NAME}` | Build name in Artifactory UI |
+| `ARTIFACTORY_BUILD_NAME` | `${IMAGE_NAME}-build` | Build-info name in Artifactory UI. The `-build` suffix keeps build-info visually distinct from the Docker image and Packages entries (same name → Free UI can't tell them apart). |
 | `ARTIFACTORY_BUILD_NUMBER` | `$CI_JOB_ID` / `$CI_PIPELINE_ID` / `$BUILD_NUMBER` / timestamp | Build number |
 | `ARTIFACTORY_PROPERTIES` | (none) | Extra `;`-separated props, e.g. `security.scan=pending;hardened=false` |
 

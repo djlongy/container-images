@@ -34,3 +34,6 @@ build.env
 # should never land in the public template. Keep anything you
 # don't want sanitized under local/ and it stays on your machine.
 local/
+
+# Internal design notes / hand-off docs — kept on-disk, not shipped
+docs/

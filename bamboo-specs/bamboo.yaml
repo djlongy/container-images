@@ -58,7 +58,9 @@
 #                             in global.env.example for five presets.
 #   ARTIFACTORY_MANIFEST_PATH Layout template for the REST storage path
 #                             used by jf rt set-props.
-#   ARTIFACTORY_BUILD_NAME    Defaults to image name
+#   ARTIFACTORY_BUILD_NAME    Defaults to ${IMAGE_NAME}-build (suffix
+#                             distinguishes build-info from the image
+#                             and its packages in the Artifactory UI)
 #   ARTIFACTORY_BUILD_NUMBER  Defaults to ${bamboo_buildResultKey} via
 #                             build.sh's fallback chain
 #   ARTIFACTORY_PROPERTIES    Extra ;-separated props (optional)
