@@ -148,57 +148,71 @@ grype-db-sync:
     - if: '$CI_COMMIT_TAG'
   allow_failure: true
 
-# ── Promote to production registry ────────────────────────────────────
-# Copies the exact image (same digest, same layers) from QA/dev registry
-# to production registry using crane. No rebuild. Bit-for-bit identical.
-#
-# Requires manual approval — the job won't run until someone clicks "play".
+# ── Promote dev → prod (Harbor native copy, intra-project) ────────────
+# Copies the approved digest from <project>/dev/<image>:<tag> to
+# <project>/prod/<image>:<tag> via Harbor's POST /api/v2.0/projects/
+# <proj>/repositories/<repo>/artifacts?from=<src> endpoint. Intra-
+# project = manifest mount: no blob re-upload, digest preserved bit-
+# for-bit. Manual approval gate.
 #
 # CI variables needed:
-#   PROD_PUSH_REGISTRY          — production registry hostname
-#   PROD_PUSH_PROJECT  — project/path in prod registry (defaults to PUSH_PROJECT)
-#   PROD_PUSH_REGISTRY_USER     — prod registry username
-#   PROD_PUSH_REGISTRY_PASSWORD — prod registry password
+#   PUSH_REGISTRY               — harbor hostname (same for dev + prod)
+#   PUSH_PROJECT                — includes dev/ sub-path, e.g. base-images/dev
+#   PROD_PUSH_PROJECT           — includes prod/ sub-path, e.g. base-images/prod
+#   PUSH_REGISTRY_USER/PASSWORD — Harbor creds (robot account preferred)
 #
-# Set ENABLE_PROD_PROMOTE=true as a CI variable to enable the promote stage.
-# Without it, promote jobs are skipped (safe default for repos that don't
-# need multi-registry promotion).
+# PROD_PUSH_REGISTRY_USER/PASSWORD still accepted for split-registry
+# setups, but when source and dest share a host (the subpath model),
+# one credential is enough.
+#
+# Set ENABLE_PROD_PROMOTE=true to enable this stage.
 
 .promote-prod:
   stage: promote
-  image:
-    name: gcr.io/go-containerregistry/crane:debug
-    entrypoint: [""]
+  image: ${ALPINE_IMAGE:-alpine:3.21}
+  before_script:
+    - apk add --no-cache bash curl >/dev/null
   script:
-    # IMAGE_DIGEST is the QA registry ref in digest form (name@sha256:...)
-    # inherited from build.env via artifacts.reports.dotenv. Using the
-    # digest ref for the source guarantees bit-for-bit promotion — no
-    # risk of the tag getting reassigned between build and promote.
-    # BUILDKIT_TAG is the original tag we want to preserve on the
-    # destination side so downstream consumers keep their version-
-    # pinned refs.
     - 'if [ -f images/${IMAGE_DIR}/image.env ]; then . images/${IMAGE_DIR}/image.env; else . images/${IMAGE_DIR}/image.env.example; fi'
     - |
-      SRC="${IMAGE_DIGEST}"
-      DST="${PROD_PUSH_REGISTRY}/${PROD_PUSH_PROJECT:-${PUSH_PROJECT}}/${IMAGE_NAME}:${BUILDKIT_TAG}"
-      echo "=== Promoting to production ==="
-      echo "  Source: ${SRC}"
-      echo "  Dest:   ${DST}"
-    # Authenticate to both registries
-    - |
-      if [ -n "${PUSH_REGISTRY_USER:-}" ] && [ -n "${PUSH_REGISTRY_PASSWORD:-}" ]; then
-        crane auth login "${PUSH_REGISTRY}" -u "${PUSH_REGISTRY_USER}" -p "${PUSH_REGISTRY_PASSWORD}"
+      # Split PUSH_PROJECT (e.g. "base-images/dev") into project + src subpath.
+      SRC_PROJECT="${PUSH_PROJECT%%/*}"
+      SRC_SUBPATH="${PUSH_PROJECT#*/}"
+      DST_PROJECT="${PROD_PUSH_PROJECT%%/*}"
+      DST_SUBPATH="${PROD_PUSH_PROJECT#*/}"
+
+      # Harbor's artifact-copy API requires src and dst to live in the
+      # same Harbor instance (they do — we're subpath-only). Cross-host
+      # promotion needs crane or skopeo; not the supported path here.
+      if [ "${SRC_PROJECT}" != "${DST_PROJECT}" ]; then
+        echo "ERROR: subpath-model promote requires SRC and DST in the same Harbor project."
+        echo "       SRC project: ${SRC_PROJECT}"
+        echo "       DST project: ${DST_PROJECT}"
+        exit 1
       fi
-      if [ -n "${PROD_PUSH_REGISTRY_USER:-}" ] && [ -n "${PROD_PUSH_REGISTRY_PASSWORD:-}" ]; then
-        crane auth login "${PROD_PUSH_REGISTRY}" -u "${PROD_PUSH_REGISTRY_USER}" -p "${PROD_PUSH_REGISTRY_PASSWORD}"
+
+      # The repo-path under the project: <subpath>/<IMAGE_NAME>
+      SRC_REPO="${SRC_SUBPATH}/${IMAGE_NAME}"
+      DST_REPO="${DST_SUBPATH}/${IMAGE_NAME}"
+
+      # URL-encode the forward-slash in <subpath>/<image> for the REST path.
+      ENC_DST_REPO="${DST_REPO//\//%252F}"
+
+      AUTH="${PUSH_REGISTRY_USER}:${PUSH_REGISTRY_PASSWORD}"
+      FROM_REF="${SRC_PROJECT}/${SRC_REPO}:${BUILDKIT_TAG}"
+      ENDPOINT="https://${PUSH_REGISTRY}/api/v2.0/projects/${DST_PROJECT}/repositories/${ENC_DST_REPO}/artifacts?from=${FROM_REF}"
+
+      echo "=== Promoting ==="
+      echo "  SRC: ${PUSH_REGISTRY}/${SRC_PROJECT}/${SRC_REPO}:${BUILDKIT_TAG}"
+      echo "  DST: ${PUSH_REGISTRY}/${DST_PROJECT}/${DST_REPO}:${BUILDKIT_TAG}"
+
+      CODE=$(curl -sS -o /tmp/resp -w "%{http_code}" -u "${AUTH}" -X POST "${ENDPOINT}")
+      if [ "${CODE}" != "201" ]; then
+        echo "ERROR: Harbor copy API returned HTTP ${CODE}" >&2
+        cat /tmp/resp >&2
+        exit 1
       fi
-    # Copy — same digest, same layers, no rebuild
-    - |
-      crane copy "${SRC}" "${DST}"
-      echo "Promoted: ${DST}"
-      echo ""
-      echo "Source digest: $(crane digest "${SRC}")"
-      echo "Dest digest:   $(crane digest "${DST}")"
+      echo "✓ Promoted."
   rules:
     - if: '$ENABLE_PROD_PROMOTE != "true"'
       when: never

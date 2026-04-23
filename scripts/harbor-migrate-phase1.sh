@@ -1,53 +1,51 @@
 #!/usr/bin/env bash
-# Phase 1 of the Harbor env-split migration.
+# Phase 1 of the Harbor env-subpath migration.
 #
-# Crane-copies every repo+tag under the legacy base-images/ project to
-# the new base-images-prod/ project (same behaviour for charts/ if it
-# had any artifacts). Copy is done by digest — bit-for-bit identical,
-# same layer blobs, same manifest, same OCI referrers (cosign sigs and
-# attestations). Existing consumers keep working because the old
-# project is untouched during the grace period.
+# Re-homes every legacy flat repo (base-images/nginx, charts/foo, etc.)
+# into the prod/ subpath inside the same Harbor project via Harbor's
+# native artifact-copy REST API. Existing tags are preserved at their
+# old flat location during the grace period so GitOps references keep
+# resolving; Phase 5 deletes the flat duplicates once every consumer
+# has been repointed.
 #
-# Scope is intentionally limited to Phase 1 projects (base-images,
-# charts). The script is designed to be deleted after Phase 5 — it's
-# one-shot migration code, not ongoing tooling.
+# Before:   harbor.mgt.newen.au/base-images/nginx:1.29.8-alpine-abc
+# After:    harbor.mgt.newen.au/base-images/prod/nginx:1.29.8-alpine-abc
+#           (same digest — intra-project manifest mount)
+#
+# Dev-subpath pushes (harbor.mgt.newen.au/base-images/dev/nginx:tag)
+# come from future CI builds, not this script. Retention rule on
+# dev/** prunes to last 6 tags; prod/** is immutable.
+#
+# Scope: Phase 1 projects only (base-images, charts). The script is
+# one-shot migration code — delete after Phase 5.
 #
 # Usage:
 #   scripts/harbor-migrate-phase1.sh             # dry-run (default)
 #   scripts/harbor-migrate-phase1.sh --go        # actually copy
 #   scripts/harbor-migrate-phase1.sh --go --force-overwrite
-#                                                # re-copy tags that
-#                                                # already exist in dst
 #
 # Prereqs:
-#   - HARBOR_ADMIN_PASSWORD or Vault access for kv-mgt/apps/harbor/runtime
-#   - Destination projects (base-images-prod, charts-prod) MUST exist
-#     (ansible creates them — run the role first).
+#   - HARBOR_ADMIN_PASSWORD or Vault access at
+#     kv-mgt/apps/harbor/runtime:harbor_admin_password
 #
-# Implementation note:
-#   Uses Harbor's native artifact-copy REST API (POST /api/v2.0/projects/
-#   <dst>/repositories/<repo>/artifacts?from=<src>/<repo>:<tag>) rather
-#   than crane copy. Reasons:
-#     - Server-side operation — no local bandwidth / file descriptors.
-#     - Crane has a pathological "bad file descriptor" failure mode on
-#       macOS against some TLS endpoints that no amount of ulimit
-#       tuning fixes.
-#     - Same Harbor instance — the API guarantees bit-for-bit identical
-#       manifest+layers (no re-push, just registry metadata linkage).
+# Implementation: Harbor's POST /api/v2.0/projects/<dst>/repositories/
+# <repo>/artifacts?from=<src>/<repo>:<tag> endpoint. Intra-project
+# copies are manifest-mount operations — no blob re-upload, same digest
+# guaranteed. The destination <dst> is the SAME project as <src>; only
+# the <repo> path differs (nginx → prod/nginx).
 #
 # Safety:
-#   - Dry-run by default. Lists every planned copy with source+dest
-#     digests. Only --go performs the actual copy.
-#   - Skips tags that already exist in dst with matching digest (safe
-#     to re-run). Use --force-overwrite to re-copy regardless.
-#   - Never deletes anything from src. Legacy base-images/ stays intact
-#     for the grace period.
+#   - Dry-run by default. --go required to execute.
+#   - Skips tags already present at dst with matching digest.
+#   - Never deletes anything from src. Legacy flat tags stay for the
+#     grace period until Phase 5.
 
 set -euo pipefail
 
 HARBOR_HOST="${HARBOR_HOST:-harbor.mgt.newen.au}"
 HARBOR_USER="${HARBOR_USER:-admin}"
 MIGRATE_PROJECTS=(base-images charts)
+PROMOTION_SUBPATH="prod"
 
 DRY_RUN=true
 FORCE_OVERWRITE=false
@@ -82,25 +80,28 @@ command -v /usr/bin/curl >/dev/null 2>&1 || {
   exit 1
 }
 
-# ── Discover repos + tags in each source project ─────────────────────
 _api() {
   /usr/bin/curl -sS -u "${HARBOR_USER}:${HARBOR_ADMIN_PASSWORD}" "$@"
 }
 
-_list_repos() {
+_list_repos_flat() {
+  # List repos directly under <project>/ (i.e. no subpath prefix).
+  # Skips anything already under dev/ or prod/ — those are either
+  # post-migration or future CI builds, not legacy.
   local project="$1"
   _api "https://${HARBOR_HOST}/api/v2.0/projects/${project}/repositories?page_size=100" \
     | python3 -c "
 import json, sys
 for r in json.load(sys.stdin):
-    # Harbor returns name as 'project/repo'; strip project prefix.
-    print(r['name'].split('/', 1)[1])
+    # Harbor returns 'project/repo' or 'project/sub/repo'
+    name = r['name'].split('/', 1)[1] if '/' in r['name'] else r['name']
+    if '/' not in name:
+        print(name)
 "
 }
 
 _list_tags() {
   local project="$1" repo="$2"
-  # Path-encode forward slashes in repo name for the REST endpoint.
   local enc="${repo//\//%252F}"
   _api "https://${HARBOR_HOST}/api/v2.0/projects/${project}/repositories/${enc}/artifacts?with_tag=true&page_size=100" \
     | python3 -c "
@@ -112,8 +113,7 @@ for a in json.load(sys.stdin):
 }
 
 _dst_digest() {
-  # Fetch digest of an artifact by tag from Harbor's API. Usage:
-  #   _dst_digest <project> <repo> <tag>
+  # Usage: _dst_digest <project> <repo_with_subpath> <tag>
   local project="$1" repo="$2" tag="$3"
   local enc="${repo//\//%252F}"
   _api "https://${HARBOR_HOST}/api/v2.0/projects/${project}/repositories/${enc}/artifacts/${tag}" \
@@ -127,13 +127,14 @@ except Exception:
 }
 
 _copy_artifact() {
-  # Harbor native artifact copy. Usage:
-  #   _copy_artifact <src_project> <dst_project> <repo> <tag>
-  local src="$1" dst="$2" repo="$3" tag="$4"
-  local enc="${repo//\//%252F}"
+  # Usage: _copy_artifact <project> <src_repo> <dst_repo> <tag>
+  # Intra-project copy: src and dst are the same project; only the
+  # repo path differs (nginx → prod/nginx).
+  local project="$1" src_repo="$2" dst_repo="$3" tag="$4"
+  local enc="${dst_repo//\//%252F}"
   local code
   code=$(_api -o /dev/null -w "%{http_code}" -X POST \
-    "https://${HARBOR_HOST}/api/v2.0/projects/${dst}/repositories/${enc}/artifacts?from=${src}/${repo}:${tag}")
+    "https://${HARBOR_HOST}/api/v2.0/projects/${project}/repositories/${enc}/artifacts?from=${project}/${src_repo}:${tag}")
   [ "${code}" = "201" ]
 }
 
@@ -146,27 +147,27 @@ total_failed=0
 for project in "${MIGRATE_PROJECTS[@]}"; do
   echo ""
   echo "════════════════════════════════════════════════════════════════"
-  echo "  Project: ${project}  →  ${project}-prod"
+  echo "  Project: ${project}/  →  ${project}/${PROMOTION_SUBPATH}/"
   echo "════════════════════════════════════════════════════════════════"
 
-  # Destination exists?
-  http=$(_api -o /dev/null -w "%{http_code}" "https://${HARBOR_HOST}/api/v2.0/projects/${project}-prod")
+  # Project exists?
+  http=$(_api -o /dev/null -w "%{http_code}" "https://${HARBOR_HOST}/api/v2.0/projects/${project}")
   if [ "${http}" != "200" ]; then
-    echo "SKIP: destination project '${project}-prod' doesn't exist yet."
-    echo "      Run the sw_supply_chain ansible role first."
+    echo "SKIP: project '${project}' doesn't exist."
     continue
   fi
 
-  repos=$(_list_repos "${project}")
+  repos=$(_list_repos_flat "${project}")
   if [ -z "${repos}" ]; then
-    echo "  (no repos in ${project} — nothing to migrate)"
+    echo "  (no top-level repos to migrate — either empty or already under dev/prod/)"
     continue
   fi
 
   while IFS= read -r repo; do
     [ -z "${repo}" ] && continue
+    dst_repo="${PROMOTION_SUBPATH}/${repo}"
     echo ""
-    echo "── ${project}/${repo} ──"
+    echo "── ${project}/${repo} → ${project}/${dst_repo} ──"
 
     tags=$(_list_tags "${project}" "${repo}")
     if [ -z "${tags}" ]; then
@@ -178,21 +179,21 @@ for project in "${MIGRATE_PROJECTS[@]}"; do
       [ -z "${tag}" ] && continue
       total_planned=$((total_planned + 1))
 
-      existing=$(_dst_digest "${project}-prod" "${repo}" "${tag}")
+      existing=$(_dst_digest "${project}" "${dst_repo}" "${tag}")
       if [ -n "${existing}" ] && [ "${existing}" = "${src_digest}" ] \
          && [ "${FORCE_OVERWRITE}" = "false" ]; then
-        echo "  = ${tag}  (already in dst at ${existing:0:19}, skipping)"
+        echo "  = ${tag}  (already at ${dst_repo}:${tag} with matching digest)"
         total_skipped=$((total_skipped + 1))
         continue
       fi
 
       if [ "${DRY_RUN}" = "true" ]; then
-        echo "  ~ ${tag}  ${src_digest:0:19} → ${project}-prod/${repo}:${tag}  (dry-run)"
+        echo "  ~ ${tag}  ${src_digest:0:19} → ${dst_repo}:${tag}  (dry-run)"
         continue
       fi
 
-      if _copy_artifact "${project}" "${project}-prod" "${repo}" "${tag}"; then
-        new_digest=$(_dst_digest "${project}-prod" "${repo}" "${tag}")
+      if _copy_artifact "${project}" "${repo}" "${dst_repo}" "${tag}"; then
+        new_digest=$(_dst_digest "${project}" "${dst_repo}" "${tag}")
         if [ "${new_digest}" = "${src_digest}" ]; then
           echo "  ✓ ${tag}  ${src_digest:0:19}"
           total_copied=$((total_copied + 1))
