@@ -20,9 +20,11 @@
 # one-shot migration code — delete after Phase 5.
 #
 # Usage:
-#   scripts/harbor-migrate-phase1.sh             # dry-run (default)
-#   scripts/harbor-migrate-phase1.sh --go        # actually copy
+#   scripts/harbor-migrate-phase1.sh                          # dry-run, Phase 1 default projects
+#   scripts/harbor-migrate-phase1.sh --go                     # actually copy
 #   scripts/harbor-migrate-phase1.sh --go --force-overwrite
+#   scripts/harbor-migrate-phase1.sh --projects=platform,conduit
+#                                                             # override the project list (Phase 2+)
 #
 # Prereqs:
 #   - HARBOR_ADMIN_PASSWORD or Vault access at
@@ -53,6 +55,8 @@ for arg in "$@"; do
   case "${arg}" in
     --go)              DRY_RUN=false ;;
     --force-overwrite) FORCE_OVERWRITE=true ;;
+    --projects=*)
+      IFS=',' read -r -a MIGRATE_PROJECTS <<< "${arg#--projects=}" ;;
     -h|--help)
       sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
