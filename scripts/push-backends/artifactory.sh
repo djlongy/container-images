@@ -62,25 +62,33 @@
 
 set -uo pipefail
 
-push_to_backend() {
-  local built="$1"
+# ════════════════════════════════════════════════════════════════════
+# Structure
+# ════════════════════════════════════════════════════════════════════
+# push_to_backend() is a thin orchestrator. All the real work lives
+# in named phase helpers below. The Pro/Free split is handled by two
+# flow functions (_artifactory_pro_flow / _artifactory_free_flow),
+# each calling steps in order. Same shape as the template repo so
+# mental-model transfers between codebases.
+#
+# emit_build_env is defined in scripts/build.sh (shared across push
+# backends + plain docker push) and remains in scope when this file
+# is sourced. _artifactory_resolve_push_digest echoes the pushed
+# digest; the flow passes it straight into emit_build_env.
 
-  _artifactory_require_env   || return 1
-  _artifactory_require_tools || return 1
-
-  # Normalise boolean env vars to lowercase so TRUE/True/true match
-  # consistently. Same pattern as build.sh for REMEDIATE / SBOM_*.
+_artifactory_normalise_bools() {
   ARTIFACTORY_PRO="$(printf '%s' "${ARTIFACTORY_PRO:-false}" | tr '[:upper:]' '[:lower:]')"
   ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS="$(printf '%s' "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS:-false}" | tr '[:upper:]' '[:lower:]')"
   ARTIFACTORY_XRAY_PRESCAN="$(printf '%s' "${ARTIFACTORY_XRAY_PRESCAN:-false}" | tr '[:upper:]' '[:lower:]')"
   ARTIFACTORY_XRAY_POSTSCAN="$(printf '%s' "${ARTIFACTORY_XRAY_POSTSCAN:-true}" | tr '[:upper:]' '[:lower:]')"
+}
 
+_artifactory_decompose_ref() {
+  local built="$1"
   local image_repo_tag="${built##*/}"
-  local _img_name="${image_repo_tag%:*}"
-  local _img_tag="${image_repo_tag##*:}"
 
-  export IMAGE_NAME="${_img_name}"
-  export IMAGE_TAG="${_img_tag}"
+  export IMAGE_NAME="${image_repo_tag%:*}"
+  export IMAGE_TAG="${image_repo_tag##*:}"
   export ARTIFACTORY_TEAM
 
   : "${ARTIFACTORY_ENVIRONMENT:=dev}"
@@ -91,13 +99,17 @@ push_to_backend() {
   export ARTIFACTORY_ENVIRONMENT
 
   if [ -z "${ARTIFACTORY_PUSH_HOST:-}" ]; then
-    local _url_host="${ARTIFACTORY_URL#https://}"
-    _url_host="${_url_host#http://}"
-    _url_host="${_url_host%%/*}"
-    ARTIFACTORY_PUSH_HOST="${_url_host}"
+    local _host="${ARTIFACTORY_URL#https://}"
+    _host="${_host#http://}"
+    _host="${_host%%/*}"
+    ARTIFACTORY_PUSH_HOST="${_host}"
   fi
   export ARTIFACTORY_PUSH_HOST
+}
 
+# Resolve layout templates to concrete values. Writes to the
+# _ART_-prefixed globals the flow orchestrators consume.
+_artifactory_resolve_templates() {
   local image_ref_tpl manifest_path_tpl
   if [ -n "${ARTIFACTORY_IMAGE_REF:-}" ]; then
     image_ref_tpl="${ARTIFACTORY_IMAGE_REF}"
@@ -110,191 +122,253 @@ push_to_backend() {
     manifest_path_tpl='${ARTIFACTORY_TEAM}-docker-${ARTIFACTORY_REPO_SUFFIX}/${IMAGE_NAME}/${IMAGE_TAG}/manifest.json'
   fi
 
-  local target manifest_path
-  target=$(_artifactory_expand_template "${image_ref_tpl}")
-  manifest_path=$(_artifactory_expand_template "${manifest_path_tpl}")
+  _ART_TARGET=$(_artifactory_expand_template "${image_ref_tpl}")
+  _ART_MANIFEST_PATH=$(_artifactory_expand_template "${manifest_path_tpl}")
+  _ART_BUILD_NAME="${ARTIFACTORY_BUILD_NAME:-${IMAGE_NAME}-build}"
+  _ART_BUILD_NUMBER="${ARTIFACTORY_BUILD_NUMBER:-${CI_JOB_ID:-${CI_PIPELINE_ID:-${BUILD_NUMBER:-${GITHUB_RUN_ID:-$(date -u +"%Y-%m-%dT%H-%M-%SZ")}}}}}"
+  _ART_IS_PRO="${ARTIFACTORY_PRO}"
+  _ART_PROJECT_KEY="${ARTIFACTORY_PROJECT:-${ARTIFACTORY_TEAM:-}}"
+  _ART_PROJECT_FLAG=""
+  if [ "${_ART_IS_PRO}" = "true" ] && [ -n "${_ART_PROJECT_KEY}" ]; then
+    _ART_PROJECT_FLAG="--project=${_ART_PROJECT_KEY}"
+  fi
+}
 
-  local build_name build_number
-  build_name="${ARTIFACTORY_BUILD_NAME:-${IMAGE_NAME}-build}"
-  build_number="${ARTIFACTORY_BUILD_NUMBER:-${CI_JOB_ID:-${CI_PIPELINE_ID:-${BUILD_NUMBER:-${GITHUB_RUN_ID:-$(date -u +"%Y-%m-%dT%H-%M-%SZ")}}}}}"
-
-  local is_pro="${ARTIFACTORY_PRO}"
-  local project_key="${ARTIFACTORY_PROJECT:-${ARTIFACTORY_TEAM:-}}"
-
+_artifactory_print_banner() {
+  local built="$1"
   echo ""
   echo "=== Artifactory push ==="
   echo "  Source (local):  ${built}"
-  echo "  Target:          ${target}"
+  echo "  Target:          ${_ART_TARGET}"
   echo "  Team:            ${ARTIFACTORY_TEAM}"
   echo "  Environment:     ${ARTIFACTORY_ENVIRONMENT}"
   echo "  Push host:       ${ARTIFACTORY_PUSH_HOST}"
-  echo "  Manifest path:   ${manifest_path}"
-  echo "  Build name:      ${build_name}"
-  echo "  Build number:    ${build_number}"
-  echo "  Tier:            $([ "${is_pro}" = "true" ] && echo "PRO (project=${project_key})" || echo "FREE (baseline — no Pro features)")"
+  echo "  Manifest path:   ${_ART_MANIFEST_PATH}"
+  echo "  Build name:      ${_ART_BUILD_NAME}"
+  echo "  Build number:    ${_ART_BUILD_NUMBER}"
+  if [ "${_ART_IS_PRO}" = "true" ]; then
+    echo "  Tier:            PRO (project=${_ART_PROJECT_KEY})"
+  else
+    echo "  Tier:            FREE (baseline — no Pro features)"
+  fi
+}
+
+# Single source of truth for post-push digest resolution. Prefers
+# crane (manifest-only, fast), falls back to docker inspect, then to
+# mining the `digest: sha256:…` line from a `docker push` output.
+# Echoes the digest or empty string.
+_artifactory_resolve_push_digest() {
+  local target="$1" push_output="${2:-}"
+  local digest=""
+  if command -v crane >/dev/null 2>&1; then
+    digest=$(crane digest "${target}" 2>/dev/null || echo "")
+  fi
+  if [ -z "${digest}" ]; then
+    digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${target}" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' || echo "")
+  fi
+  if [ -z "${digest}" ] && [ -n "${push_output}" ]; then
+    digest=$(extract_push_digest "${push_output}")
+  fi
+  printf '%s' "${digest}"
+}
+
+# ── Pro phase helpers ───────────────────────────────────────────────
+# Each Pro helper has one job. Helpers that may surface a policy
+# failure return non-zero; the flow orchestrator translates the code
+# into the action the user's fail-mode policy dictates.
+
+_artifactory_pro_enrich_build_info() {
+  echo ""
+  echo "── Pro: enriching build info before push ──"
+  # shellcheck disable=SC2086
+  jf rt build-collect-env "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" ${_ART_PROJECT_FLAG} 2>&1
+  # shellcheck disable=SC2086
+  jf rt build-add-git "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" ${_ART_PROJECT_FLAG} 2>&1
+}
+
+# Optional pre-push Xray gate. Returns:
+#   0  scan clean / scanner unavailable / disabled / warn-mode violations
+#   1  violations in strict mode (caller must abort before push)
+_artifactory_pro_xray_prescan() {
+  [ "${ARTIFACTORY_XRAY_PRESCAN}" = "true" ] || return 0
+
+  if [ -z "${_ART_PROJECT_FLAG}" ]; then
+    echo "" >&2
+    echo "  WARN: ARTIFACTORY_XRAY_PRESCAN=true but project_flag is empty" >&2
+    echo "        (no ARTIFACTORY_PROJECT or ARTIFACTORY_TEAM set). Scan will" >&2
+    echo "        be informational only — set a project to enforce violations." >&2
+  fi
+  echo ""
+  echo "── Pro: Xray pre-push scan (jf docker scan ${_ART_TARGET}) ──"
+  # shellcheck disable=SC2086
+  jf docker scan "${_ART_TARGET}" ${_ART_PROJECT_FLAG} --fail=true 2>&1
+  local rc=$?
+
+  case "${rc}" in
+    0)
+      echo "  ✓ Xray pre-push clean"
+      return 0
+      ;;
+    3)
+      case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
+        true|strict)
+          echo "" >&2
+          echo "  ERROR: Xray pre-push scan reported policy violations" >&2
+          echo "         — refusing to push (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
+          echo "         The image is NOT in Artifactory. Review the scanner" >&2
+          echo "         output above, remediate, rebuild, and retry." >&2
+          return 1
+          ;;
+        *)
+          echo "  WARN: Xray pre-push scan found violations — pushing anyway (warn mode)" >&2
+          echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to block push on violations." >&2
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      echo "  WARN: Xray pre-push scan exit ${rc} (unlicensed, unreachable, or indexing) — continuing with push" >&2
+      return 0
+      ;;
+  esac
+}
+
+_artifactory_pro_push() {
+  # shellcheck disable=SC2086
+  jf docker push "${_ART_TARGET}" \
+    --build-name="${_ART_BUILD_NAME}" \
+    --build-number="${_ART_BUILD_NUMBER}" \
+    ${_ART_PROJECT_FLAG} || {
+      echo "ERROR: jf docker push failed" >&2
+      return 1
+    }
+}
+
+_artifactory_pro_publish_build_info() {
+  echo ""
+  echo "── Pro: publishing build info ──"
+  # shellcheck disable=SC2086
+  jf rt build-publish "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" ${_ART_PROJECT_FLAG} 2>&1 | tail -5
+}
+
+# Optional post-push Xray build scan. Same tri-state return contract
+# as _artifactory_pro_xray_prescan above.
+_artifactory_pro_xray_postscan() {
+  if [ "${ARTIFACTORY_XRAY_POSTSCAN}" != "true" ]; then
+    echo ""
+    echo "── Pro: Xray build scan skipped (ARTIFACTORY_XRAY_POSTSCAN=${ARTIFACTORY_XRAY_POSTSCAN}) ──"
+    return 0
+  fi
+
+  echo ""
+  echo "── Pro: Xray build scan ──"
+  # shellcheck disable=SC2086
+  jf build-scan "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" ${_ART_PROJECT_FLAG} 2>&1
+  local rc=$?
+
+  case "${rc}" in
+    0)
+      echo "  ✓ Xray clean (no policy violations)"
+      return 0
+      ;;
+    3)
+      case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
+        true|strict)
+          echo "" >&2
+          echo "  ERROR: Xray policy violations detected — failing build" >&2
+          echo "         (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
+          echo "         The image has been pushed, but this run is being" >&2
+          echo "         rejected so downstream promote/deploy stages don't" >&2
+          echo "         advance. Review findings in Artifactory →" >&2
+          echo "         Builds → ${_ART_BUILD_NAME}/${_ART_BUILD_NUMBER} → Xray Data." >&2
+          return 1
+          ;;
+        *)
+          echo "  WARN: Xray reported policy violations — continuing (warn mode)" >&2
+          echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to hard-fail the build." >&2
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      echo "  WARN: Xray scan exit ${rc} (unlicensed, unreachable, or still indexing)" >&2
+      return 0
+      ;;
+  esac
+}
+
+# ── Flow orchestrators ──────────────────────────────────────────────
+
+_artifactory_pro_flow() {
+  local built="$1"
+  _artifactory_pro_enrich_build_info
+  docker tag "${built}" "${_ART_TARGET}"
+  _artifactory_pro_xray_prescan || return 1
+  _artifactory_pro_push || return 1
+  _artifactory_pro_publish_build_info
+  _artifactory_pro_xray_postscan || return 1
+
+  local push_digest
+  push_digest=$(_artifactory_resolve_push_digest "${_ART_TARGET}")
+  emit_build_env "${_ART_TARGET}" "${push_digest}"
+
+  _artifactory_set_props "${_ART_MANIFEST_PATH}" \
+    "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" "${ARTIFACTORY_ENVIRONMENT}"
+}
+
+_artifactory_free_flow() {
+  local built="$1"
+  docker tag "${built}" "${_ART_TARGET}"
+
+  local push_output
+  push_output=$(docker push "${_ART_TARGET}" 2>&1) || {
+    echo "${push_output}" >&2
+    echo "ERROR: docker push to Artifactory failed" >&2
+    return 1
+  }
+  echo "${push_output}"
+
+  local push_digest
+  push_digest=$(_artifactory_resolve_push_digest "${_ART_TARGET}" "${push_output}")
+  emit_build_env "${_ART_TARGET}" "${push_digest}"
+
+  # Build info with module linkage + env vars (merged from jf rt bp).
+  # Same data shape that jf docker push writes on Pro.
+  _artifactory_build_publish_free_with_modules \
+    "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" "${_ART_MANIFEST_PATH}" "${_ART_TARGET}"
+
+  # build.name/build.number on every blob so each layer's detail
+  # page shows the Used-By-Build backlink.
+  _artifactory_set_props_all_layers "${_ART_MANIFEST_PATH}" \
+    "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}"
+
+  _artifactory_set_props "${_ART_MANIFEST_PATH}" \
+    "${_ART_BUILD_NAME}" "${_ART_BUILD_NUMBER}" "${ARTIFACTORY_ENVIRONMENT}"
+}
+
+# ── Entry point ─────────────────────────────────────────────────────
+
+push_to_backend() {
+  local built="$1"
+
+  _artifactory_require_env   || return 1
+  _artifactory_require_tools || return 1
+
+  _artifactory_normalise_bools
+  _artifactory_decompose_ref "${built}"
+  _artifactory_resolve_templates
+  _artifactory_print_banner "${built}"
 
   _artifactory_jf_config || return 1
   _artifactory_docker_login "${ARTIFACTORY_PUSH_HOST}" || return 1
 
-  # ════════════════════════════════════════════════════════════════════
-  # PRO PATH
-  # ════════════════════════════════════════════════════════════════════
-  if [ "${is_pro}" = "true" ]; then
-    echo ""
-    echo "── Pro: enriching build info before push ──"
-    local project_flag=""
-    [ -n "${project_key}" ] && project_flag="--project=${project_key}"
-
-    # shellcheck disable=SC2086
-    jf rt build-collect-env "${build_name}" "${build_number}" ${project_flag} 2>&1
-    # shellcheck disable=SC2086
-    jf rt build-add-git "${build_name}" "${build_number}" ${project_flag} 2>&1
-
-    docker tag "${built}" "${target}"
-
-    # ── Optional: pre-push Xray gate (jf docker scan) ───────────────
-    # When ARTIFACTORY_XRAY_PRESCAN=true, run `jf docker scan` against
-    # the locally-tagged image BEFORE pushing. With FAIL_ON_VIOLATIONS
-    # strict mode, policy failures keep the image OUT of Artifactory
-    # entirely. Air-gap friendly — talks only to internal Xray, no
-    # outbound to anchore.io / public DBs.
-    if [ "${ARTIFACTORY_XRAY_PRESCAN}" = "true" ]; then
-      if [ -z "${project_flag}" ]; then
-        echo "" >&2
-        echo "  WARN: ARTIFACTORY_XRAY_PRESCAN=true but project_flag is empty" >&2
-        echo "        (no ARTIFACTORY_PROJECT or ARTIFACTORY_TEAM set). Scan will" >&2
-        echo "        be informational only — set a project to enforce violations." >&2
-      fi
-      echo ""
-      echo "── Pro: Xray pre-push scan (jf docker scan ${target}) ──"
-      # shellcheck disable=SC2086
-      jf docker scan "${target}" ${project_flag} --fail=true 2>&1
-      local prescan_rc=$?
-      case "${prescan_rc}" in
-        0)
-          echo "  ✓ Xray pre-push clean"
-          ;;
-        3)
-          case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
-            true|strict)
-              echo "" >&2
-              echo "  ERROR: Xray pre-push scan reported policy violations" >&2
-              echo "         — refusing to push (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
-              echo "         The image is NOT in Artifactory. Review the scanner" >&2
-              echo "         output above, remediate, rebuild, and retry." >&2
-              return 1
-              ;;
-            *)
-              echo "  WARN: Xray pre-push scan found violations — pushing anyway (warn mode)" >&2
-              echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to block push on violations." >&2
-              ;;
-          esac
-          ;;
-        *)
-          echo "  WARN: Xray pre-push scan exit ${prescan_rc} (unlicensed, unreachable, or indexing) — continuing with push" >&2
-          ;;
-      esac
-    fi
-
-    # shellcheck disable=SC2086
-    jf docker push "${target}" \
-      --build-name="${build_name}" \
-      --build-number="${build_number}" \
-      ${project_flag} || {
-        echo "ERROR: jf docker push failed" >&2
-        return 1
-      }
-
-    echo ""
-    echo "── Pro: publishing build info ──"
-    # shellcheck disable=SC2086
-    jf rt build-publish "${build_name}" "${build_number}" ${project_flag} 2>&1 | tail -5
-
-    # Xray build scan — toggled by ARTIFACTORY_XRAY_POSTSCAN (default true).
-    # Symmetric with PRESCAN above. Violation-handling follows
-    # ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS (warn | strict). Non-3 exits
-    # (licensing / unreachable / indexing) always stay warnings.
-    if [ "${ARTIFACTORY_XRAY_POSTSCAN}" = "true" ]; then
-      echo ""
-      echo "── Pro: Xray build scan ──"
-      # shellcheck disable=SC2086
-      jf build-scan "${build_name}" "${build_number}" ${project_flag} 2>&1
-      local xray_rc=$?
-      case "${xray_rc}" in
-        0)
-          echo "  ✓ Xray clean (no policy violations)"
-          ;;
-        3)
-          case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
-            true|strict)
-              echo "" >&2
-              echo "  ERROR: Xray policy violations detected — failing build" >&2
-              echo "         (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
-              echo "         The image has been pushed, but this run is being" >&2
-              echo "         rejected so downstream promote/deploy stages don't" >&2
-              echo "         advance. Review findings in Artifactory →" >&2
-              echo "         Builds → ${build_name}/${build_number} → Xray Data." >&2
-              return 1
-              ;;
-            *)
-              echo "  WARN: Xray reported policy violations — continuing (warn mode)" >&2
-              echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to hard-fail the build." >&2
-              ;;
-          esac
-          ;;
-        *)
-          echo "  WARN: Xray scan exit ${xray_rc} (unlicensed, unreachable, or still indexing)" >&2
-          ;;
-      esac
-    else
-      echo ""
-      echo "── Pro: Xray build scan skipped (ARTIFACTORY_XRAY_POSTSCAN=${ARTIFACTORY_XRAY_POSTSCAN}) ──"
-    fi
-
-    local push_digest=""
-    push_digest=$(crane digest "${target}" 2>/dev/null || echo "")
-    if [ -z "${push_digest}" ]; then
-      push_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${target}" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' || echo "")
-    fi
-
-    # emit_build_env is defined in scripts/build.sh and in scope
-    emit_build_env "${target}" "${push_digest}"
-
-    _artifactory_set_props "${manifest_path}" \
-      "${build_name}" "${build_number}" "${ARTIFACTORY_ENVIRONMENT}"
-
-  # ════════════════════════════════════════════════════════════════════
-  # FREE PATH
-  # ════════════════════════════════════════════════════════════════════
+  if [ "${_ART_IS_PRO}" = "true" ]; then
+    _artifactory_pro_flow "${built}" || return 1
   else
-    docker tag "${built}" "${target}"
-    local push_output
-    push_output=$(docker push "${target}" 2>&1) || {
-      echo "${push_output}" >&2
-      echo "ERROR: docker push to Artifactory failed" >&2
-      return 1
-    }
-    echo "${push_output}"
-
-    local push_digest
-    push_digest=$(extract_push_digest "${push_output}")
-    emit_build_env "${target}" "${push_digest}"
-
-    # Build info with module linkage + env vars (merged from jf rt bp)
-    _artifactory_build_publish_free_with_modules \
-      "${build_name}" "${build_number}" "${manifest_path}" "${target}"
-
-    # build.name/build.number on every blob so each layer's detail
-    # page shows the Used-By-Build backlink (Pro's jf docker push sets
-    # these automatically; Free has to iterate).
-    _artifactory_set_props_all_layers "${manifest_path}" \
-      "${build_name}" "${build_number}"
-
-    _artifactory_set_props "${manifest_path}" \
-      "${build_name}" "${build_number}" "${ARTIFACTORY_ENVIRONMENT}"
+    _artifactory_free_flow "${built}" || return 1
   fi
 
-  echo "Pushed: ${target}"
+  echo "Pushed: ${_ART_TARGET}"
 }
 
 # ── Internals ────────────────────────────────────────────────────────
