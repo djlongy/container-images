@@ -51,6 +51,13 @@ emit_build_env() {
   local name="${full_image%:*}"
   local image_digest="${full_image}"
   [ -n "${digest}" ] && image_digest="${name}@${digest}"
+
+  # Export so downstream in-process steps (e.g. SBOM generation at the
+  # end of the orchestrator) can read them without re-parsing
+  # build.env. Matches the template-repo contract.
+  export IMAGE_REF="${full_image}"
+  export IMAGE_DIGEST="${image_digest}"
+
   cat > "${REPO_ROOT}/build.env" <<BUILDENV
 IMAGE_REF=${full_image}
 IMAGE_NAME=${name}
@@ -79,15 +86,46 @@ extract_push_digest() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <image-name> [--push]
+Usage: $(basename "$0") <image-name> [--push | --dry-run]
        $(basename "$0") --list
+       $(basename "$0") --help
 
 Builds a promoted container image from images/<name>/.
 
 Options:
-  --push    Push the built image after building
-  --list    List all available images
-  --help    Show this help message
+  --push       Push the built image after building (respects REGISTRY_KIND)
+  --dry-run    Resolve config + base digest, print the report block,
+               stop before docker build. No image produced. Useful for
+               "what would this build with my current env?"
+  --list       List all available images under images/
+  --help, -h   Show this help message
+
+Customisation (fork-owned, no template edits required):
+
+  images/<name>/remediate.sh     per-image remediation override (falls
+                                 back to scripts/remediate/\${DISTRO}.sh
+                                 when absent). Runs inside the image.
+  images/<name>/labels.env       per-image LABEL key=value lines, added
+                                 to the image's OCI labels.
+  images/<name>/Dockerfile       per-image custom Dockerfile. Used only
+                                 when CUSTOM_DOCKERFILE=true in the
+                                 per-image image.env; otherwise the
+                                 shared root Dockerfile is used.
+
+All behavioural toggles are env-driven. See global.env.example (shared)
+and images/<name>/image.env.example (per-image) for the full list.
+Commonly-used:
+
+  REGISTRY_KIND=artifactory   use scripts/push-backends/artifactory.sh
+  REMEDIATE=false             skip scripts/remediate/\${DISTRO}.sh
+  INJECT_CERTS=true           bake certs/*.crt into the trust store
+  CUSTOM_DOCKERFILE=true      use images/<name>/Dockerfile over the root
+  SBOM_GENERATE=true          emit <image>-<tag>.cdx.json after build
+  ARTIFACTORY_PRO=true        enable Pro-tier push path
+  ARTIFACTORY_XRAY_PRESCAN=true
+                              jf docker scan BEFORE push (admin gate)
+  ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true
+                              fail build on Xray policy violation
 EOF
   exit "${1:-0}"
 }
@@ -116,17 +154,25 @@ list_images() {
 [ $# -eq 0 ] && usage 1
 
 PUSH=false
+DRY_RUN=false
 IMAGE=""
 
 for arg in "$@"; do
   case "${arg}" in
-    --push)  PUSH=true ;;
-    --list)  list_images ;;
-    --help)  usage 0 ;;
-    -*)      echo "Unknown option: ${arg}" >&2; usage 1 ;;
-    *)       IMAGE="${arg}" ;;
+    --push)     PUSH=true ;;
+    --dry-run)  DRY_RUN=true ;;
+    --list)     list_images ;;
+    --help|-h)  usage 0 ;;
+    -*)         echo "ERROR: unknown option: ${arg}" >&2; echo "" >&2; usage 1 >&2 ;;
+    *)          IMAGE="${arg}" ;;
   esac
 done
+
+if [ "${PUSH}" = "true" ] && [ "${DRY_RUN}" = "true" ]; then
+  echo "ERROR: --push and --dry-run are mutually exclusive" >&2
+  echo "" >&2
+  usage 1 >&2
+fi
 
 [ -z "${IMAGE}" ] && { echo "ERROR: Image name required" >&2; usage 1; }
 
@@ -164,7 +210,11 @@ for __v in \
   ARTIFACTORY_TEAM ARTIFACTORY_ENVIRONMENT \
   ARTIFACTORY_BUILD_NAME ARTIFACTORY_BUILD_NUMBER ARTIFACTORY_PROPERTIES \
   ARTIFACTORY_SBOM_REPO ARTIFACTORY_GRYPE_DB_REPO \
-  ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF ARTIFACTORY_MANIFEST_PATH
+  ARTIFACTORY_PUSH_HOST ARTIFACTORY_IMAGE_REF ARTIFACTORY_MANIFEST_PATH \
+  ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS \
+  ARTIFACTORY_XRAY_PRESCAN ARTIFACTORY_XRAY_POSTSCAN \
+  CRANE_URL SYFT_INSTALLER_URL SYFT_VERSION \
+  SBOM_GENERATE SBOM_TARGET SBOM_FILE
 do
   if [ "${!__v+set}" = "set" ]; then
     __SHELL_OVERRIDES="${__SHELL_OVERRIDES}${__v}=$(printf '%q' "${!__v}")"$'\n'
@@ -199,6 +249,16 @@ INJECT_CERTS="${INJECT_CERTS:-false}"
 ORIGINAL_USER="${ORIGINAL_USER:-root}"
 VENDOR="${VENDOR:-example.com}"
 
+# Normalise boolean env vars to lowercase so TRUE/True/true all work
+# identically. The Dockerfile FROM selectors (certs-${INJECT_CERTS},
+# remediate-${REMEDIATE}) MUST see lowercase values. Same pattern as
+# the template repo.
+REMEDIATE="$(printf '%s' "${REMEDIATE}"               | tr '[:upper:]' '[:lower:]')"
+INJECT_CERTS="$(printf '%s' "${INJECT_CERTS}"          | tr '[:upper:]' '[:lower:]')"
+CUSTOM_DOCKERFILE="$(printf '%s' "${CUSTOM_DOCKERFILE:-false}" | tr '[:upper:]' '[:lower:]')"
+SBOM_GENERATE="$(printf '%s' "${SBOM_GENERATE:-false}" | tr '[:upper:]' '[:lower:]')"
+SBOM_TARGET="$(printf '%s'   "${SBOM_TARGET:-image}"   | tr '[:upper:]' '[:lower:]')"
+
 # ── Derived values ───────────────────────────────────────────────────
 
 GIT_SHORT="$(git -C "${REPO_ROOT}" rev-parse --short=7 HEAD 2>/dev/null || echo "local")"
@@ -217,13 +277,83 @@ if [ -z "${SOURCE_URL}" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1
   SOURCE_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
 fi
 
-# ── Upstream base digest (optional) ──────────────────────────────────
-BASE_DIGEST=""
-if command -v crane >/dev/null 2>&1; then
-  BASE_DIGEST=$(crane digest "${UPSTREAM_REF}" 2>/dev/null || echo "")
-elif docker buildx imagetools inspect --raw "${UPSTREAM_REF}" >/dev/null 2>&1; then
-  BASE_DIGEST=$(docker buildx imagetools inspect "${UPSTREAM_REF}" --format '{{.Digest}}' 2>/dev/null || echo "")
-fi
+# ── Upstream base digest (optional but preferred) ───────────────────
+# Used for the org.opencontainers.image.base.digest OCI label.
+# Strategy (matches container-image-template):
+#   1. crane digest                       — fast, manifest-only
+#   2. auto-install crane from CRANE_URL  — if not on PATH
+#   3. docker buildx imagetools inspect   — fallback
+# Empty BASE_DIGEST is non-fatal — the build still succeeds.
+# NOTE: Resolution happens AFTER the config report below so users see
+# progress immediately. The placeholder "<resolving...>" in the report
+# is a signal that a network call is about to run.
+
+_build_derive_crane_url() {
+  [ -n "${CRANE_URL:-}" ] && return 0
+  local _os="" _arch=""
+  case "$(uname -s)" in
+    Linux)  _os="Linux" ;;
+    Darwin) _os="Darwin" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)   _arch="x86_64" ;;
+    aarch64|arm64)  _arch="arm64" ;;
+  esac
+  if [ -n "${_os}" ] && [ -n "${_arch}" ]; then
+    CRANE_URL="https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_${_os}_${_arch}.tar.gz"
+  fi
+}
+
+_build_install_crane() {
+  command -v crane >/dev/null 2>&1 && return 0
+  _build_derive_crane_url
+  if [ -z "${CRANE_URL:-}" ]; then
+    echo "  NOTE: crane not on PATH and CRANE_URL not set — skipping install" >&2
+    echo "        (will fall back to docker buildx imagetools inspect)" >&2
+    return 1
+  fi
+  echo "→ crane not on PATH — installing from ${CRANE_URL}"
+  mkdir -p "${REPO_ROOT}/.bin"
+  if curl -fSL --progress-bar --max-time 120 "${CRANE_URL}" \
+       | tar xz -C "${REPO_ROOT}/.bin" crane 2>/dev/null \
+     && [ -x "${REPO_ROOT}/.bin/crane" ]; then
+    export PATH="${REPO_ROOT}/.bin:${PATH}"
+    echo "  ✓ crane installed to ${REPO_ROOT}/.bin/crane"
+    return 0
+  fi
+  echo "  WARN: crane install failed — URL unreachable or tarball invalid" >&2
+  echo "        (will fall back to docker buildx imagetools inspect)" >&2
+  return 1
+}
+
+_build_resolve_base_digest() {
+  BASE_DIGEST=""
+  _build_install_crane || true
+
+  if command -v crane >/dev/null 2>&1; then
+    echo "→ Resolving upstream digest: crane digest ${UPSTREAM_REF}"
+    local _out _rc
+    _out=$(crane digest "${UPSTREAM_REF}" 2>&1) && _rc=0 || _rc=$?
+    if [ "${_rc}" -eq 0 ]; then
+      BASE_DIGEST="${_out}"
+      echo "  ✓ ${BASE_DIGEST}"
+      return 0
+    fi
+    echo "  WARN: crane digest failed (rc=${_rc}) for ${UPSTREAM_REF}" >&2
+    printf '%s\n' "${_out}" | head -2 | sed 's/^/        /' >&2
+  fi
+
+  if command -v docker >/dev/null 2>&1; then
+    echo "→ Resolving upstream digest: docker buildx imagetools inspect ${UPSTREAM_REF}"
+    BASE_DIGEST=$(docker buildx imagetools inspect "${UPSTREAM_REF}" --format '{{.Digest}}' 2>/dev/null || echo "")
+    if [ -n "${BASE_DIGEST}" ]; then
+      echo "  ✓ ${BASE_DIGEST}"
+      return 0
+    fi
+    echo "  WARN: docker buildx imagetools inspect also failed" >&2
+    echo "        (base.digest label will be empty — image build unaffected)" >&2
+  fi
+}
 
 # ── Preflight: materialise remediate.sh ──────────────────────────────
 REMEDIATE_CLEANUP=""
@@ -250,7 +380,7 @@ elif [ ! -f "${IMAGE_DIR}/remediate.sh" ]; then
 fi
 
 # Select Dockerfile: custom per-image or shared root
-if [ "${CUSTOM_DOCKERFILE:-false}" = "true" ] && [ -f "${IMAGE_DIR}/Dockerfile" ]; then
+if [ "${CUSTOM_DOCKERFILE}" = "true" ] && [ -f "${IMAGE_DIR}/Dockerfile" ]; then
   DOCKERFILE="${IMAGE_DIR}/Dockerfile"
 else
   DOCKERFILE="${REPO_ROOT}/Dockerfile"
@@ -312,7 +442,7 @@ echo "  container-images build"
 echo "=========================================="
 echo "  Image:              ${FULL_IMAGE}"
 echo "  Upstream:           ${UPSTREAM_REF}"
-echo "  Upstream digest:    ${BASE_DIGEST:-<not resolved>}"
+echo "  Upstream digest:    <resolving...>"
 echo "  Git commit:         ${GIT_SHORT} (${GIT_SHA})"
 echo "  Created (UTC):      ${BUILD_DATE}"
 echo "  Distro:             ${DISTRO}"
@@ -322,6 +452,17 @@ echo "  Original user:      ${ORIGINAL_USER}"
 echo "  Vendor:             ${VENDOR}"
 echo "=========================================="
 echo ""
+
+# Resolve base digest AFTER the report so user sees config immediately
+# and understands the network call is about to run.
+_build_resolve_base_digest
+
+# --dry-run stops here: config resolved, digest fetched, no image built.
+if [ "${DRY_RUN}" = "true" ]; then
+  echo ""
+  echo "→ --dry-run: stopping before docker build"
+  exit 0
+fi
 
 BUILD_ARGS=(
   --build-arg "UPSTREAM_REGISTRY=${UPSTREAM_REGISTRY}"
@@ -401,3 +542,72 @@ if [ "${PUSH}" = "true" ]; then
     fi
   fi
 fi
+
+# ════════════════════════════════════════════════════════════════════
+# SBOM generation (opt-in, decoupled from shipping)
+# ════════════════════════════════════════════════════════════════════
+# Matches the template repo's scripts/build.sh shape. Off by default
+# on purpose — the CI pipeline already has a dedicated `sbom` stage in
+# .gitlab-ci.yml that does this against the pushed digest, and a
+# separate `sbom-ingest` stage that ships via scripts/sbom-post.sh.
+# Running both would duplicate work.
+#
+# Turn SBOM_GENERATE=true on for local dev or forks without the CI
+# sbom stage. SBOM_TARGET=image (default) scans the built/pushed
+# image; SBOM_TARGET=source scans the working directory instead —
+# useful for Ansible / pip / npm source builds.
+#
+# Shipping stays the domain of scripts/sbom-post.sh as a standalone
+# stage — do not chain it here.
+
+_build_install_syft() {
+  command -v syft >/dev/null 2>&1 && return 0
+  local _url="${SYFT_INSTALLER_URL:-https://raw.githubusercontent.com/anchore/syft/main/install.sh}"
+  local _ver="${SYFT_VERSION:-v1.14.0}"
+  echo ""
+  echo "→ syft not on PATH — installing ${_ver} from ${_url}"
+  mkdir -p "${REPO_ROOT}/.bin"
+  if curl -fsSL --max-time 120 "${_url}" \
+       | sh -s -- -b "${REPO_ROOT}/.bin" "${_ver}" >/dev/null 2>&1 \
+     && [ -x "${REPO_ROOT}/.bin/syft" ]; then
+    export PATH="${REPO_ROOT}/.bin:${PATH}"
+    echo "  ✓ syft installed"
+    return 0
+  fi
+  echo "  WARN: syft install failed — skipping SBOM generation" >&2
+  return 1
+}
+
+_build_generate_sbom() {
+  [ "${SBOM_GENERATE}" = "true" ] || return 0
+
+  _build_install_syft || return 0
+  command -v syft >/dev/null 2>&1 || return 0
+
+  local basename scan_target
+  basename="${IMAGE_NAME##*/}-${FULL_TAG}"
+  SBOM_FILE="${SBOM_FILE:-${basename}.cdx.json}"
+
+  case "${SBOM_TARGET}" in
+    source)  scan_target="dir:${REPO_ROOT}" ;;
+    image|*) scan_target="${IMAGE_DIGEST:-${FULL_IMAGE}}" ;;
+  esac
+
+  echo ""
+  echo "→ syft: generating CycloneDX SBOM for ${scan_target}"
+  if ! syft "${scan_target}" -o cyclonedx-json="${SBOM_FILE}"; then
+    echo "  WARN: syft failed — no SBOM produced" >&2
+    return 0
+  fi
+
+  echo "→ SBOM: ${SBOM_FILE} ($(wc -c < "${SBOM_FILE}") bytes)"
+  if command -v jq >/dev/null 2>&1; then
+    echo "        components: $(jq '.components | length' "${SBOM_FILE}")"
+  fi
+  if [ -f "${REPO_ROOT}/build.env" ] && ! grep -q "^SBOM_FILE=" "${REPO_ROOT}/build.env"; then
+    echo "SBOM_FILE=${SBOM_FILE}" >> "${REPO_ROOT}/build.env"
+  fi
+  echo "  (ship via scripts/sbom-post.sh ${SBOM_FILE} in a separate stage)"
+}
+
+_build_generate_sbom

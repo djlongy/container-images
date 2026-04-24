@@ -15,14 +15,50 @@
 # See the template repo's scripts/push-backends/artifactory.sh for
 # the full Free/Pro feature comparison table.
 #
-# Required env:
+# ── WHERE DO THE ARTIFACTORY_* ENV VARS COME FROM? ───────────────────
+#
+# Any of these paths work — build.sh resolves them in this precedence
+# order before it sources this backend:
+#
+#   1. global.env.example  (tracked, canonical repo defaults)
+#   2. global.env          (gitignored, local override for shared vars)
+#   3. images/<name>/image.env.example  (tracked, per-image defaults)
+#   4. images/<name>/image.env          (gitignored, per-image override)
+#   5. Shell / CI env      (always wins — GitLab/Bamboo pipeline vars,
+#                           `export ARTIFACTORY_URL=… ./scripts/build.sh`,
+#                           etc.)
+#
+# Nothing here REQUIRES one specific path; CI pipelines typically never
+# touch image.env and set everything as masked group/project variables.
+# Local dev typically uses global.env + per-image image.env to avoid
+# re-exporting on every shell. Either pattern (or mixing) is supported.
+#
+# → See global.env.example (shared repo-wide settings) and
+#   images/<name>/image.env.example (per-image settings) for the
+#   authoritative list of every variable, what it does, its default,
+#   and copy-and-uncomment templates.
+#
+# ── Variables this backend reads ─────────────────────────────────────
+#
+# Required (both tiers):
 #   ARTIFACTORY_URL, ARTIFACTORY_USER, ARTIFACTORY_TEAM
 #   ARTIFACTORY_TOKEN | ARTIFACTORY_PASSWORD
 #
-# Pro-only: ARTIFACTORY_PRO=true, ARTIFACTORY_PROJECT
+# Optional (both tiers):
+#   ARTIFACTORY_ENVIRONMENT, ARTIFACTORY_PUSH_HOST,
+#   ARTIFACTORY_IMAGE_REF, ARTIFACTORY_MANIFEST_PATH,
+#   ARTIFACTORY_BUILD_NAME, ARTIFACTORY_BUILD_NUMBER,
+#   ARTIFACTORY_PROPERTIES, ARTIFACTORY_SBOM_REPO
 #
-# Layout templates: ARTIFACTORY_IMAGE_REF, ARTIFACTORY_MANIFEST_PATH
-# (see global.env.example for 5 named presets)
+# Pro-only (ignored when ARTIFACTORY_PRO is unset/false):
+#   ARTIFACTORY_PRO, ARTIFACTORY_PROJECT,
+#   ARTIFACTORY_XRAY_PRESCAN, ARTIFACTORY_XRAY_POSTSCAN,
+#   ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS
+#
+# Auto-install (air-gap support):
+#   JF_BINARY_URL, JF_INSTALLER_URL, JF_INSTALL_DIR
+#
+# Layout templates: see global.env.example for 5 named presets.
 
 set -uo pipefail
 
@@ -31,6 +67,13 @@ push_to_backend() {
 
   _artifactory_require_env   || return 1
   _artifactory_require_tools || return 1
+
+  # Normalise boolean env vars to lowercase so TRUE/True/true match
+  # consistently. Same pattern as build.sh for REMEDIATE / SBOM_*.
+  ARTIFACTORY_PRO="$(printf '%s' "${ARTIFACTORY_PRO:-false}" | tr '[:upper:]' '[:lower:]')"
+  ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS="$(printf '%s' "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS:-false}" | tr '[:upper:]' '[:lower:]')"
+  ARTIFACTORY_XRAY_PRESCAN="$(printf '%s' "${ARTIFACTORY_XRAY_PRESCAN:-false}" | tr '[:upper:]' '[:lower:]')"
+  ARTIFACTORY_XRAY_POSTSCAN="$(printf '%s' "${ARTIFACTORY_XRAY_POSTSCAN:-true}" | tr '[:upper:]' '[:lower:]')"
 
   local image_repo_tag="${built##*/}"
   local _img_name="${image_repo_tag%:*}"
@@ -75,8 +118,7 @@ push_to_backend() {
   build_name="${ARTIFACTORY_BUILD_NAME:-${IMAGE_NAME}-build}"
   build_number="${ARTIFACTORY_BUILD_NUMBER:-${CI_JOB_ID:-${CI_PIPELINE_ID:-${BUILD_NUMBER:-${GITHUB_RUN_ID:-$(date -u +"%Y-%m-%dT%H-%M-%SZ")}}}}}"
 
-  local is_pro="false"
-  [ "${ARTIFACTORY_PRO:-false}" = "true" ] && is_pro="true"
+  local is_pro="${ARTIFACTORY_PRO}"
   local project_key="${ARTIFACTORY_PROJECT:-${ARTIFACTORY_TEAM:-}}"
 
   echo ""
@@ -89,7 +131,7 @@ push_to_backend() {
   echo "  Manifest path:   ${manifest_path}"
   echo "  Build name:      ${build_name}"
   echo "  Build number:    ${build_number}"
-  echo "  Tier:            $([ "${is_pro}" = "true" ] && echo "PRO (project=${project_key})" || echo "FREE (LCD baseline)")"
+  echo "  Tier:            $([ "${is_pro}" = "true" ] && echo "PRO (project=${project_key})" || echo "FREE (baseline — no Pro features)")"
 
   _artifactory_jf_config || return 1
   _artifactory_docker_login "${ARTIFACTORY_PUSH_HOST}" || return 1
@@ -109,6 +151,51 @@ push_to_backend() {
     jf rt build-add-git "${build_name}" "${build_number}" ${project_flag} 2>&1
 
     docker tag "${built}" "${target}"
+
+    # ── Optional: pre-push Xray gate (jf docker scan) ───────────────
+    # When ARTIFACTORY_XRAY_PRESCAN=true, run `jf docker scan` against
+    # the locally-tagged image BEFORE pushing. With FAIL_ON_VIOLATIONS
+    # strict mode, policy failures keep the image OUT of Artifactory
+    # entirely. Air-gap friendly — talks only to internal Xray, no
+    # outbound to anchore.io / public DBs.
+    if [ "${ARTIFACTORY_XRAY_PRESCAN}" = "true" ]; then
+      if [ -z "${project_flag}" ]; then
+        echo "" >&2
+        echo "  WARN: ARTIFACTORY_XRAY_PRESCAN=true but project_flag is empty" >&2
+        echo "        (no ARTIFACTORY_PROJECT or ARTIFACTORY_TEAM set). Scan will" >&2
+        echo "        be informational only — set a project to enforce violations." >&2
+      fi
+      echo ""
+      echo "── Pro: Xray pre-push scan (jf docker scan ${target}) ──"
+      # shellcheck disable=SC2086
+      jf docker scan "${target}" ${project_flag} --fail=true 2>&1
+      local prescan_rc=$?
+      case "${prescan_rc}" in
+        0)
+          echo "  ✓ Xray pre-push clean"
+          ;;
+        3)
+          case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
+            true|strict)
+              echo "" >&2
+              echo "  ERROR: Xray pre-push scan reported policy violations" >&2
+              echo "         — refusing to push (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
+              echo "         The image is NOT in Artifactory. Review the scanner" >&2
+              echo "         output above, remediate, rebuild, and retry." >&2
+              return 1
+              ;;
+            *)
+              echo "  WARN: Xray pre-push scan found violations — pushing anyway (warn mode)" >&2
+              echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to block push on violations." >&2
+              ;;
+          esac
+          ;;
+        *)
+          echo "  WARN: Xray pre-push scan exit ${prescan_rc} (unlicensed, unreachable, or indexing) — continuing with push" >&2
+          ;;
+      esac
+    fi
+
     # shellcheck disable=SC2086
     jf docker push "${target}" \
       --build-name="${build_name}" \
@@ -123,18 +210,46 @@ push_to_backend() {
     # shellcheck disable=SC2086
     jf rt build-publish "${build_name}" "${build_number}" ${project_flag} 2>&1 | tail -5
 
-    # Xray scan — non-fatal. Exit 3 = policy violation (scan ran),
-    # exit 1 = Xray absent/unlicensed/build not indexed. Neither aborts.
-    echo ""
-    echo "── Pro: Xray build scan ──"
-    # shellcheck disable=SC2086
-    jf build-scan "${build_name}" "${build_number}" ${project_flag} 2>&1
-    local xray_rc=$?
-    case "${xray_rc}" in
-      0) ;;
-      3) echo "  WARN: Xray reported policy violations (exit 3 = --fail default)" >&2 ;;
-      *) echo "  WARN: Xray scan exit ${xray_rc} (unlicensed, unreachable, or still indexing)" >&2 ;;
-    esac
+    # Xray build scan — toggled by ARTIFACTORY_XRAY_POSTSCAN (default true).
+    # Symmetric with PRESCAN above. Violation-handling follows
+    # ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS (warn | strict). Non-3 exits
+    # (licensing / unreachable / indexing) always stay warnings.
+    if [ "${ARTIFACTORY_XRAY_POSTSCAN}" = "true" ]; then
+      echo ""
+      echo "── Pro: Xray build scan ──"
+      # shellcheck disable=SC2086
+      jf build-scan "${build_name}" "${build_number}" ${project_flag} 2>&1
+      local xray_rc=$?
+      case "${xray_rc}" in
+        0)
+          echo "  ✓ Xray clean (no policy violations)"
+          ;;
+        3)
+          case "${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS}" in
+            true|strict)
+              echo "" >&2
+              echo "  ERROR: Xray policy violations detected — failing build" >&2
+              echo "         (ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=${ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS})" >&2
+              echo "         The image has been pushed, but this run is being" >&2
+              echo "         rejected so downstream promote/deploy stages don't" >&2
+              echo "         advance. Review findings in Artifactory →" >&2
+              echo "         Builds → ${build_name}/${build_number} → Xray Data." >&2
+              return 1
+              ;;
+            *)
+              echo "  WARN: Xray reported policy violations — continuing (warn mode)" >&2
+              echo "        Set ARTIFACTORY_XRAY_FAIL_ON_VIOLATIONS=true to hard-fail the build." >&2
+              ;;
+          esac
+          ;;
+        *)
+          echo "  WARN: Xray scan exit ${xray_rc} (unlicensed, unreachable, or still indexing)" >&2
+          ;;
+      esac
+    else
+      echo ""
+      echo "── Pro: Xray build scan skipped (ARTIFACTORY_XRAY_POSTSCAN=${ARTIFACTORY_XRAY_POSTSCAN}) ──"
+    fi
 
     local push_digest=""
     push_digest=$(crane digest "${target}" 2>/dev/null || echo "")
@@ -473,7 +588,11 @@ except json.JSONDecodeError:
 ")
   while IFS= read -r fname; do
     [ -z "${fname}" ] && continue
-    jf rt set-props "${tag_dir}/${fname}" "${props}" 2>/dev/null && count=$((count + 1))
+    # Swallow jf's per-call `{"status":"success",...}` stdout blob —
+    # on the Free path we iterate over every blob in the tag dir and
+    # the repetition is just noise. The trailing "set on N files" line
+    # below is the one user-facing summary.
+    jf rt set-props "${tag_dir}/${fname}" "${props}" >/dev/null 2>&1 && count=$((count + 1))
   done <<< "${files_list}"
 
   echo "  ✓ build.name/build.number set on ${count} files"
@@ -588,7 +707,7 @@ _artifactory_set_props() {
   # artifact rather than a speculative path.
   [ -n "${ARTIFACTORY_PROPERTIES:-}" ] && props="${props};${ARTIFACTORY_PROPERTIES}"
 
-  if ! jf rt set-props "${manifest_path}" "${props}" 2>/dev/null; then
+  if ! jf rt set-props "${manifest_path}" "${props}" >/dev/null 2>&1; then
     echo "  WARN: 'jf rt set-props' failed for ${manifest_path}" >&2
     echo "        (check manifest path matches the repo storage layout)" >&2
   fi

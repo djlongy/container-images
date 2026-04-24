@@ -4,8 +4,19 @@
 # Called from the pipeline after `syft` generates sbom.cdx.json. This
 # script is intentionally scaffolded even when no endpoint is configured
 # — when the business decides which SBOM platform to adopt, add the
-# relevant CI variables and this script will start shipping. No code
+# relevant variables and this script will start shipping. No code
 # change required.
+#
+# ── Where do the sink env vars come from? ────────────────────────────
+# Any of: shell / CI env, global.env (gitignored), global.env.example
+# (tracked), or per-image images/<name>/image.env(.example).
+# Precedence: shell > image.env > global.env > .example. CI pipelines
+# typically use masked group/project variables; locally the repo-wide
+# sinks usually live in global.env. See global.env.example and
+# images/<name>/image.env.example for descriptions. This script
+# doesn't source anything itself — callers export the relevant vars
+# (or let build.sh's shell-snapshot propagate them) and then invoke
+# `./scripts/sbom-post.sh <cdx.json>`.
 #
 # Supported sinks (set one or more):
 #

@@ -12,7 +12,14 @@
 #   - As a CI stage before grype scan runs (see .gitlab-ci.yml)
 #   - On a cron schedule (GitLab scheduled pipeline) for daily freshness
 #
-# Required env:
+# ── Where do the env vars come from? ─────────────────────────────────
+# Any of: shell / CI env, global.env (gitignored), global.env.example
+# (tracked), or per-image images/<name>/image.env(.example).
+# Precedence: shell > image.env > global.env > .example. CI typically
+# uses masked group/project variables; local runs populate global.env.
+# See global.env.example for descriptions.
+#
+# Required variables:
 #   ARTIFACTORY_URL          e.g. https://artifactory.example.com
 #   ARTIFACTORY_USER         user with Deploy rights on the DB repo
 #   ARTIFACTORY_TOKEN | ARTIFACTORY_PASSWORD
